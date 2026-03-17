@@ -1,0 +1,71 @@
+# ---- Secrets -----------------------------------------------
+.env
+*.key
+*.pem
+secrets/
+
+# ---- Planning docs (not for public repo) -------------------
+_planning/
+conversation-RAG-plan.md
+
+# ---- Python ---------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---- Testing & coverage ------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ---- Type checking -----------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ---- Data & models (large files) ---------------------------
+data/
+inbox/
+*.pkl
+*.bin
+*.pt
+*.safetensors
+models/
+# Keep the book state file structure but not the data
+!data/.gitkeep
+!inbox/.gitkeep
+
+# ---- Qdrant local storage ---------------------------------
+qdrant_storage/
+
+# ---- IDE ---------------------------------------------------
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS ---------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# ---- Logs -------------------------------------------------
+*.log
+logs/
