@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     embedding_model: str = "all-mpnet-base-v2"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     embedding_dim: int = 768
+    # Code-specific embeddings — uses microsoft/unixcoder-base (768-dim, ~500 MB)
+    # Set use_code_encoder=false to skip and use mpnet for all content
+    code_embedding_model: str = "microsoft/unixcoder-base"
+    code_embedding_dim: int = 768
+    use_code_encoder: bool = True
 
     # ---- Qdrant ----------------------------------------------------
     # mode: "local"  → no Docker, stores data on disk at qdrant_local_path

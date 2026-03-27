@@ -63,6 +63,10 @@ class Chunk(BaseModel):
     title: str = ""
     page_number: int | None = None
     chunk_index: int = 0
+    # Code-specific structural metadata (populated by ASTCodeChunker)
+    language: str | None = None          # e.g. "python", "typescript"
+    scope_chain: str | None = None       # e.g. "Trainer.train_step"
+    docstring: str | None = None         # extracted docstring / leading comment
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -78,6 +82,9 @@ class Chunk(BaseModel):
             "title": self.title,
             "page_number": self.page_number,
             "chunk_index": self.chunk_index,
+            "language": self.language,
+            "scope_chain": self.scope_chain,
+            "docstring": self.docstring,
             **self.metadata,
         }
 
