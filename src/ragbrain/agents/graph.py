@@ -21,6 +21,10 @@ from ragbrain.agents.nodes.grade import grade_documents, route_after_grade
 from ragbrain.agents.nodes.retrieve import retrieve
 from ragbrain.agents.nodes.rewrite import rewrite_query
 from ragbrain.agents.state import RAGState
+from ragbrain.config import settings
+
+# Activate LangSmith tracing once at module load if key is configured.
+settings.setup_tracing()
 
 
 def build_rag_graph():
@@ -96,4 +100,5 @@ def query(question: str, user_id: str | None = None) -> dict:
         "answer": "",
         "error": None,
     }
-    return graph.invoke(initial_state)
+    run_name = f"rag: {question[:60]}"
+    return graph.invoke(initial_state, config={"run_name": run_name})

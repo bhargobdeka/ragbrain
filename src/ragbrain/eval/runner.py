@@ -197,6 +197,10 @@ class EvalRunner:
 
     def _run_case(self, case: EvalCase) -> CaseResult:
         from ragbrain.agents.graph import query as rag_query
+        from ragbrain.config import settings
+
+        # Give this trace a descriptive name in LangSmith so it's easy to find.
+        settings.setup_tracing()
 
         t0 = time.perf_counter()
         error: str | None = None

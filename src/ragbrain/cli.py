@@ -11,6 +11,7 @@ Commands:
   ragbrain review-architecture        Run the self-improvement architecture review
   ragbrain plan-upgrades              Run the Deep Agents upgrade planner
   ragbrain eval                       Run quality evaluation suites
+  ragbrain tracing                    Show LangSmith tracing status
 """
 
 from __future__ import annotations
@@ -536,6 +537,52 @@ def plan_upgrades(
 
     if post_slack:
         console.print("[green]Plan posted to Slack.[/green]")
+
+
+# ---- tracing --------------------------------------------------------
+
+@app.command()
+def tracing() -> None:
+    """Show LangSmith tracing status and instructions to enable it."""
+    from ragbrain.config import settings as _s
+
+    enabled = _s.setup_tracing()
+    has_key = bool(_s.langsmith_api_key)
+
+    if enabled:
+        console.print(Panel(
+            f"[green]LangSmith tracing is [bold]ACTIVE[/bold][/green]\n\n"
+            f"Project : [cyan]{_s.langsmith_project}[/cyan]\n"
+            f"Endpoint: [dim]{_s.langsmith_endpoint}[/dim]\n\n"
+            f"Open your dashboard at [link=https://smith.langchain.com]https://smith.langchain.com[/link] "
+            f"and select the [cyan]{_s.langsmith_project}[/cyan] project.",
+            title="[bold]Tracing[/bold]",
+            border_style="green",
+        ))
+    elif has_key:
+        console.print(Panel(
+            "[yellow]API key is set but tracing is not enabled.[/yellow]\n\n"
+            "Add this to your [cyan].env[/cyan]:\n"
+            "  [bold]LANGCHAIN_TRACING_V2=true[/bold]\n"
+            "  [bold]LANGCHAIN_PROJECT=ragbrain[/bold]",
+            title="[bold]Tracing[/bold]",
+            border_style="yellow",
+        ))
+    else:
+        console.print(Panel(
+            "[red]LangSmith tracing is [bold]OFF[/bold][/red] — no API key found.\n\n"
+            "To enable:\n"
+            "  1. Sign up at [link=https://smith.langchain.com]https://smith.langchain.com[/link]\n"
+            "  2. Copy your API key from [bold]Settings → API Keys[/bold]\n"
+            "  3. Add to your [cyan].env[/cyan]:\n"
+            "       [bold]LANGCHAIN_API_KEY=lsv2_...[/bold]\n"
+            "       [bold]LANGCHAIN_TRACING_V2=true[/bold]\n"
+            "       [bold]LANGCHAIN_PROJECT=ragbrain[/bold]\n\n"
+            "Every [cyan]ragbrain query[/cyan] and [cyan]ragbrain eval[/cyan] run will then "
+            "appear as a named trace in your LangSmith dashboard.",
+            title="[bold]Tracing[/bold]",
+            border_style="red",
+        ))
 
 
 # ---- Main entry point ------------------------------------------------

@@ -71,6 +71,16 @@ class Settings(BaseSettings):
     max_retries: int = 2
     max_hallucination_retries: int = 2
 
+    # ---- LangSmith (optional observability) ------------------------
+    # These use the standard LANGCHAIN_ env var names (no RAGBRAIN_ prefix).
+    # Set LANGCHAIN_API_KEY and LANGCHAIN_TRACING_V2=true in your .env to enable.
+    langsmith_api_key: str = Field(default="", alias="LANGCHAIN_API_KEY")
+    langsmith_tracing: str = Field(default="false", alias="LANGCHAIN_TRACING_V2")
+    langsmith_project: str = Field(default="ragbrain", alias="LANGCHAIN_PROJECT")
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com", alias="LANGCHAIN_ENDPOINT"
+    )
+
     # ---- Telegram --------------------------------------------------
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -110,6 +120,25 @@ class Settings(BaseSettings):
     @property
     def interests_text(self) -> str:
         return ", ".join(self.interests)
+
+    # ---- Tracing ---------------------------------------------------
+
+    def setup_tracing(self) -> bool:
+        """Activate LangSmith tracing if LANGCHAIN_API_KEY is configured.
+
+        Sets the four LANGCHAIN_* env vars that LangChain reads automatically,
+        then returns True if tracing was enabled (key present + tracing=true).
+        Safe to call multiple times — idempotent.
+        """
+        import os
+
+        if not self.langsmith_api_key:
+            return False
+        os.environ.setdefault("LANGCHAIN_API_KEY", self.langsmith_api_key)
+        os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+        os.environ.setdefault("LANGCHAIN_PROJECT", self.langsmith_project)
+        os.environ.setdefault("LANGCHAIN_ENDPOINT", self.langsmith_endpoint)
+        return os.environ.get("LANGCHAIN_TRACING_V2", "false").lower() == "true"
 
     # ---- LLM factories ---------------------------------------------
 
