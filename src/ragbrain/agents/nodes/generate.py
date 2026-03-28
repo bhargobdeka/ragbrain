@@ -65,7 +65,8 @@ def _format_context(state: RAGState) -> tuple[str, list[dict[str, str]]]:
             sources.append({
                 "title": chunk.title or source_label,
                 "url": chunk.source_url,
-                "snippet": chunk.content[:200],
+                "snippet": chunk.content[:200],   # short display excerpt
+                "content": chunk.content,          # full text for eval judges
             })
 
     return "\n\n---\n\n".join(context_parts), sources

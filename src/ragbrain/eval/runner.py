@@ -354,7 +354,44 @@ class EvalRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def default_results_dir(eval_dir: Path) -> Path:
+        """Return the auto-save directory, creating it if needed."""
+        results_dir = eval_dir / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        return results_dir
+
+    @staticmethod
     def save_results(suites: list[SuiteResult], path: Path) -> None:
         """Save results as JSON for CI/CD or baseline comparison."""
         data = [s.to_dict() for s in suites]
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def auto_save(suites: list[SuiteResult], eval_dir: Path, label: str = "eval") -> Path:
+        """Auto-save results to tests/eval/results/<label>_YYYYMMDD_HHMMSS.json."""
+        from datetime import datetime, timezone
+
+        results_dir = EvalRunner.default_results_dir(eval_dir)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = results_dir / f"{label}_{ts}.json"
+        EvalRunner.save_results(suites, path)
+        return path
+
+    @staticmethod
+    def load_history(eval_dir: Path, label: str = "eval", last_n: int = 10) -> list[dict]:
+        """Load the last N saved result files, newest first."""
+        results_dir = eval_dir / "results"
+        if not results_dir.exists():
+            return []
+        files = sorted(
+            results_dir.glob(f"{label}_*.json"),
+            reverse=True,
+        )[:last_n]
+        history = []
+        for f in files:
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                history.append({"file": f.name, "suites": data})
+            except Exception:
+                pass
+        return history

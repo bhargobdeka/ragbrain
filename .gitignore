@@ -69,3 +69,6 @@ Thumbs.db
 # ---- Logs -------------------------------------------------
 *.log
 logs/
+
+# ---- Eval results (generated, not committed) ---------------
+tests/eval/results/

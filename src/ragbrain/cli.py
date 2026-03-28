@@ -261,6 +261,39 @@ def review_architecture(
         console.print("[green]Review posted to Slack.[/green]")
 
 
+# ---- eval helpers ---------------------------------------------------
+
+def _red_team_to_suite_result(rt_result: "object") -> "object":
+    """Convert a RedTeamResult into a SuiteResult for uniform JSON storage."""
+    from ragbrain.eval.assertions import AssertionResult
+    from ragbrain.eval.runner import CaseResult, SuiteResult
+
+    case_results = []
+    for v in rt_result.vulnerabilities:
+        ar = AssertionResult(
+            assertion_type="not_vulnerable",
+            passed=not v.vulnerable,
+            message="; ".join(v.evidence),
+        )
+        case_results.append(CaseResult(
+            case_id=v.case_id,
+            query=v.query,
+            answer=v.answer,
+            sources=[],
+            assertion_results=[ar],
+            judge_results=[],
+            passed=not v.vulnerable,
+            latency_ms=v.latency_ms,
+            retrieval_attempts=0,
+            hallucination_check="",
+        ))
+    return SuiteResult(
+        suite_name="Red Team",
+        description="Adversarial probe results",
+        case_results=case_results,
+    )
+
+
 # ---- eval ------------------------------------------------------------
 
 @app.command()
@@ -295,15 +328,19 @@ def eval(
         "tests/eval", "--eval-dir",
         help="Directory containing YAML eval suites (default: tests/eval).",
     ),
+    history: bool = typer.Option(
+        False, "--history", help="Show a table of past eval runs from tests/eval/results/ and exit.",
+    ),
 ) -> None:
     """Run evaluation suites or red-team adversarial probes against the RAG pipeline.
 
     Quality evaluation (default):
-        ragbrain eval                          # all suites
+        ragbrain eval                          # all suites, auto-saved to tests/eval/results/
         ragbrain eval --suite rag_basic        # one suite
         ragbrain eval --feature rlhf-book      # filter by feature tag
-        ragbrain eval --output results.json    # save for regression tracking
+        ragbrain eval --output results.json    # also save to a specific path
         ragbrain eval --baseline prev.json     # compare against saved baseline
+        ragbrain eval --history                # show past run history
 
     Red-team adversarial probing:
         ragbrain eval --red-team               # static + LLM-generated probes
@@ -311,10 +348,53 @@ def eval(
     """
     eval_path = Path(eval_dir)
 
-    if not eval_path.exists():
+    if not eval_path.exists() and not history:
         console.print(f"[red]Eval directory not found:[/red] {eval_path}")
         console.print("[dim]Run from the project root or pass --eval-dir.[/dim]")
         raise typer.Exit(1)
+
+    # ---- History mode ------------------------------------------------
+    if history:
+        from ragbrain.eval.runner import EvalRunner
+        from rich import box
+        from rich.table import Table
+
+        label = "red_team" if red_team else "eval"
+        past = EvalRunner.load_history(eval_path, label=label, last_n=20)
+        if not past:
+            console.print(
+                f"[yellow]No saved results yet in {eval_path}/results/[/yellow]\n"
+                "[dim]Run [cyan]ragbrain eval[/cyan] to create the first record.[/dim]"
+            )
+            raise typer.Exit(0)
+
+        tbl = Table(
+            box=box.ROUNDED, header_style="bold cyan",
+            title=f"[bold]Eval History[/bold] — {eval_path}/results/",
+        )
+        tbl.add_column("Run", style="cyan")
+        tbl.add_column("Suite")
+        tbl.add_column("Pass rate", justify="right")
+        tbl.add_column("Avg faith.", justify="right")
+        tbl.add_column("Avg relev.", justify="right")
+        tbl.add_column("Cases", justify="right")
+
+        for run in past:
+            for suite in run["suites"]:
+                rate = suite.get("pass_rate", 0)
+                color = "green" if rate >= 0.8 else "yellow" if rate >= 0.5 else "red"
+                faith = suite.get("avg_faithfulness")
+                relev = suite.get("avg_relevance")
+                tbl.add_row(
+                    run["file"].replace(f"{label}_", "").replace(".json", ""),
+                    suite.get("suite", "?"),
+                    f"[{color}]{rate:.0%}[/{color}]",
+                    f"{faith:.2f}" if faith else "[dim]—[/dim]",
+                    f"{relev:.2f}" if relev else "[dim]—[/dim]",
+                    str(len(suite.get("cases", []))),
+                )
+        console.print(tbl)
+        raise typer.Exit(0)
 
     # ---- Red-team mode -----------------------------------------------
     if red_team:
@@ -333,6 +413,15 @@ def eval(
 
         console.print()
         print_red_team_report(result)
+
+        # Auto-save red-team results
+        from ragbrain.eval.runner import EvalRunner, SuiteResult, CaseResult
+        rt_suite = _red_team_to_suite_result(result)
+        saved_path = EvalRunner.auto_save([rt_suite], eval_path, label="red_team")
+        console.print(f"[dim]Results auto-saved to [cyan]{saved_path}[/cyan][/dim]")
+
+        if output:
+            EvalRunner.save_results([rt_suite], Path(output))
 
         vuln_count = sum(1 for v in result.vulnerabilities if v.vulnerable)
         high_count = len(result.high_severity_vulns)
@@ -384,11 +473,15 @@ def eval(
 
     print_overall_summary(results, regressions=regressions or None)
 
-    # Save JSON output
+    # Always auto-save to tests/eval/results/
+    auto_path = EvalRunner.auto_save(results, eval_path, label="eval")
+    console.print(f"[dim]Results auto-saved to [cyan]{auto_path}[/cyan][/dim]")
+    console.print(f"[dim]View history with: [cyan]ragbrain eval --history[/cyan][/dim]")
+
+    # Also save to explicit output path if requested
     if output:
-        out_path = Path(output)
-        EvalRunner.save_results(results, out_path)
-        console.print(f"[dim]Results saved to [cyan]{out_path}[/cyan][/dim]")
+        EvalRunner.save_results(results, Path(output))
+        console.print(f"[dim]Also saved to [cyan]{output}[/cyan][/dim]")
 
     # Exit 1 if any failures (useful for CI)
     total_failed = sum(

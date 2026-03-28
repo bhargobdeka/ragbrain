@@ -70,7 +70,8 @@ def judge_faithfulness(
 ) -> JudgeResult:
     """Score how well the answer is grounded in the retrieved sources."""
     context = "\n\n---\n\n".join(
-        s.get("snippet", "") or s.get("title", "") for s in sources[:5]
+        s.get("content", "") or s.get("snippet", "") or s.get("title", "")
+        for s in sources[:5]
     )
     if not context.strip():
         return JudgeResult(
@@ -172,7 +173,8 @@ def judge_context_relevance(
 ) -> JudgeResult:
     """Score how relevant the retrieved chunks are to the query."""
     context = "\n\n---\n\n".join(
-        s.get("snippet", "") or s.get("title", "") for s in sources[:5]
+        s.get("content", "") or s.get("snippet", "") or s.get("title", "")
+        for s in sources[:5]
     )
     if not context.strip():
         return JudgeResult(
