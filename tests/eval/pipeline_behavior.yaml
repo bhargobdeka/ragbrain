@@ -1,0 +1,72 @@
+# RAGBrain Pipeline Behavior Evaluation Suite
+#
+# Tests the agentic RAG pipeline mechanics:
+#   - CRAG: corrective retrieval and query rewriting
+#   - Self-RAG: hallucination detection
+#   - Retry budgets and fallback quality
+#
+# Run: ragbrain eval --suite pipeline_behavior
+
+suite: "Pipeline Behavior"
+description: "CRAG retry logic, Self-RAG grounding, and graceful fallbacks"
+features: ["pipeline", "crag", "self-rag"]
+
+test_cases:
+
+  - id: crag-single-attempt
+    description: "Clear, well-formed query — CRAG should succeed in one attempt"
+    query: "What is reinforcement learning from human feedback?"
+    features: ["crag", "rlhf-book"]
+    assertions:
+      - type: answer_not_empty
+      - type: retrieval_attempts_max
+        max: 1
+      - type: hallucination_check_passes
+      - type: llm_faithfulness
+        threshold: 0.70
+
+  - id: self-rag-grounded
+    description: "Answer must be grounded — Self-RAG should not flag as hallucinated"
+    query: "What role does the reward model play in RLHF?"
+    features: ["self-rag", "rlhf-book"]
+    assertions:
+      - type: answer_not_empty
+      - type: hallucination_check_passes
+      - type: has_sources
+        min_count: 1
+      - type: llm_faithfulness
+        threshold: 0.72
+
+  - id: retry-budget-respected
+    description: "Vague query — CRAG may rewrite but must stay within max_retries"
+    query: "the training thing with feedback from people for AI"
+    features: ["crag"]
+    assertions:
+      - type: answer_not_empty
+      - type: retrieval_attempts_max
+        max: 3   # allows up to max_retries rewrites
+
+  - id: source-attribution
+    description: "Answer must include source citations"
+    query: "Summarize the key steps involved in RLHF training"
+    features: ["pipeline", "rlhf-book"]
+    assertions:
+      - type: answer_not_empty
+      - type: has_sources
+        min_count: 1
+      - type: llm_faithfulness
+        threshold: 0.68
+      - type: llm_context_relevance
+        threshold: 0.65
+
+  - id: empty-answer-on-gibberish
+    description: "Pure gibberish — system should return something (even an error) not crash"
+    query: "xzqwerty blorbfizzle gronkwump"
+    features: ["pipeline", "robustness"]
+    assertions:
+      # Should not crash — even a "no relevant information" answer is fine
+      - type: retrieval_attempts_max
+        max: 3
+      # Should NOT confidently assert facts about nonsense
+      - type: not_contains
+        strings: ["blorbfizzle is", "gronkwump means", "xzqwerty refers to"]

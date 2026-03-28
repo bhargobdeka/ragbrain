@@ -15,6 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from ragbrain.ingestion.chunkers.router import ChunkRouter
 from ragbrain.ingestion.extractors.pdf import PDFExtractor
 from ragbrain.ingestion.extractors.rss import RSSExtractor
+from ragbrain.ingestion.extractors.slack import SlackExtractor
 from ragbrain.ingestion.extractors.web import WebExtractor
 from ragbrain.models import Document
 from ragbrain.vectorstore.qdrant import QdrantStore
@@ -32,6 +33,7 @@ class IngestionPipeline:
         self._pdf = PDFExtractor()
         self._web = WebExtractor()
         self._rss = RSSExtractor()
+        self._slack = SlackExtractor()
 
     def ingest(self, source: str) -> int:
         """Ingest a single source (file path or URL).
@@ -93,3 +95,16 @@ class IngestionPipeline:
             f"Cannot determine extractor for source: {source!r}. "
             "Provide a .pdf file path or an http(s) URL."
         )
+
+    def close(self) -> None:
+        """Close underlying storage client resources."""
+        try:
+            self._store.close()
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

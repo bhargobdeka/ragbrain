@@ -30,6 +30,7 @@ dependencies = [
     "feedparser>=6.0.11",
     # Delivery
     "python-telegram-bot>=21.0",
+    "slack-sdk>=3.33.0",
     # Scheduling
     "apscheduler>=3.10.0",
     # Config & CLI
@@ -51,6 +52,9 @@ dependencies = [
     "numpy>=1.26.0",
     "scikit-learn>=1.5.0",
     "tqdm>=4.66.0",
+    "certifi>=2024.0.0",
+    # Self-improving upgrade planner
+    "deepagents>=0.4.0",
 ]
 
 [project.optional-dependencies]

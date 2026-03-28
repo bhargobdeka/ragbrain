@@ -93,6 +93,35 @@ def evening_lesson_job() -> None:
         logger.exception("Evening lesson job failed")
 
 
+def architecture_review_job() -> None:
+    """Ingest Slack news and run architecture review."""
+    logger.info("Running architecture review job...")
+    try:
+        from ragbrain.ingestion.extractors.slack import SlackExtractor
+        from ragbrain.ingestion.pipeline import IngestionPipeline
+        from ragbrain.pipelines.architecture_review import post_to_slack, run_review
+
+        # Step 1: ingest recent Slack messages into the knowledge base
+        extractor = SlackExtractor(fetch_urls=False)
+        docs = extractor.extract_recent()
+        if docs:
+            pipeline = IngestionPipeline()
+            for doc in docs:
+                pipeline.ingest_document(doc)
+            logger.info("Ingested %d Slack news messages.", len(docs))
+
+        # Step 2: run the architecture review
+        report = run_review(post_slack=False)
+        print(report)
+
+        # Step 3: post to Slack if configured
+        if settings.slack_bot_token and (settings.slack_post_channel_id or settings.slack_channel_id):
+            post_to_slack(report)
+            logger.info("Architecture review posted to Slack.")
+    except Exception:
+        logger.exception("Architecture review job failed")
+
+
 def _parse_cron(cron_str: str) -> dict:
     """Parse '0 8 * * *' into CronTrigger kwargs."""
     parts = cron_str.split()
@@ -129,12 +158,26 @@ def run_scheduler() -> None:
         misfire_grace_time=300,
     )
 
+    # Architecture review runs 30 minutes after morning digest
+    if settings.slack_bot_token and settings.slack_channel_id:
+        review_cron = dict(morning_cron)
+        review_cron["minute"] = "30"
+        scheduler.add_job(
+            architecture_review_job,
+            CronTrigger(**review_cron),
+            id="architecture_review",
+            name="Architecture Review",
+            misfire_grace_time=300,
+        )
+
     logger.info(
         f"Scheduler started. Morning digest: {settings.morning_cron}, "
         f"Evening lesson: {settings.evening_cron} (UTC)"
     )
-    print(f"  Morning digest:  {settings.morning_cron} (UTC)")
-    print(f"  Evening lesson:  {settings.evening_cron} (UTC)")
+    print(f"  Morning digest:     {settings.morning_cron} (UTC)")
+    print(f"  Evening lesson:     {settings.evening_cron} (UTC)")
+    if settings.slack_bot_token and settings.slack_channel_id:
+        print(f"  Arch review:        {review_cron.get('minute', '30')} {morning_cron.get('hour', '8')} * * * (UTC)")
     print("  Press Ctrl+C to stop.")
 
     try:

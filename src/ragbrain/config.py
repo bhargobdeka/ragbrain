@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     llm_provider: Literal["anthropic", "openai"] = "anthropic"
     llm_model: str = "claude-sonnet-4-6"
-    llm_fast_model: str = "claude-3-5-haiku-20241022"
+    llm_fast_model: str = "claude-haiku-4-5"
     llm_temperature: float = 0.0
 
     # ---- Embeddings (local) ----------------------------------------
@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # mode: "local"  → no Docker, stores data on disk at qdrant_local_path
     #       "server" → connects to a running Qdrant server at qdrant_url
     qdrant_mode: Literal["local", "server"] = "local"
-    qdrant_local_path: str = "./data/qdrant"
+    qdrant_local_path: str = "~/.ragbrain/qdrant"
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
     qdrant_collection: str = "ragbrain_default"
@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     # ---- Telegram --------------------------------------------------
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+
+    # ---- Slack (for reading AI news + posting review output) ------
+    slack_bot_token: str = ""
+    slack_channel_id: str = ""      # DM or channel ID where news arrives
+    slack_post_channel_id: str = "" # where to post review results (defaults to same)
+    slack_lookback_hours: int = 24
 
     # ---- Article pipeline ------------------------------------------
     # Stored as raw string to avoid pydantic-settings json.loads() on list fields

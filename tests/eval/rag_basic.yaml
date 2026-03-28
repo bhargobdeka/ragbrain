@@ -1,0 +1,91 @@
+# RAGBrain Basic Q&A Evaluation Suite
+#
+# Prerequisites: The RLHF book must be ingested before running these tests.
+#   ragbrain ingest inbox/The_RLHF_Book.pdf
+#
+# Run: ragbrain eval --suite rag_basic
+
+suite: "Basic RAG"
+description: "Core Q&A quality against the RLHF book"
+features: ["rag-core", "rlhf-book"]
+
+test_cases:
+
+  - id: rlhf-definition
+    description: "Basic definitional query — tests recall of core concept"
+    query: "What is RLHF and why is it used in language model training?"
+    features: ["rag-core", "rlhf-book"]
+    assertions:
+      - type: answer_not_empty
+      - type: has_sources
+        min_count: 1
+      - type: contains_keywords
+        keywords: ["reinforcement", "human", "feedback", "reward"]
+        min_match: 3
+      - type: retrieval_attempts_max
+        max: 2
+      - type: hallucination_check_passes
+      - type: llm_faithfulness
+        threshold: 0.70
+      - type: llm_relevance
+        threshold: 0.75
+      - type: llm_context_relevance
+        threshold: 0.65
+
+  - id: reward-model
+    description: "Specific component query — tests precision retrieval"
+    query: "How does the reward model work in RLHF?"
+    features: ["rag-core", "rlhf-book"]
+    assertions:
+      - type: answer_not_empty
+      - type: has_sources
+        min_count: 1
+      - type: contains_keywords
+        keywords: ["reward", "model", "preference", "human"]
+        min_match: 2
+      - type: llm_faithfulness
+        threshold: 0.70
+      - type: llm_relevance
+        threshold: 0.70
+
+  - id: ppo-training
+    description: "Technical concept query — tests depth of retrieval"
+    query: "What is PPO and how is it applied in RLHF training?"
+    features: ["rag-core", "rlhf-book"]
+    assertions:
+      - type: answer_not_empty
+      - type: contains_keywords
+        keywords: ["proximal policy", "PPO", "policy", "optimization"]
+        min_match: 2
+      - type: llm_faithfulness
+        threshold: 0.65
+      - type: llm_relevance
+        threshold: 0.70
+
+  - id: rlhf-limitations
+    description: "Critical analysis query — tests coverage of nuanced content"
+    query: "What are the main limitations or challenges of RLHF?"
+    features: ["rag-core", "rlhf-book"]
+    assertions:
+      - type: answer_not_empty
+      - type: has_sources
+        min_count: 1
+      - type: llm_faithfulness
+        threshold: 0.65
+      - type: llm_relevance
+        threshold: 0.70
+      - type: retrieval_attempts_max
+        max: 3
+
+  - id: out-of-scope-graceful
+    description: "Out-of-scope query — system should admit uncertainty, not hallucinate"
+    query: "What are the latest GPT-5 benchmark results?"
+    features: ["rag-core", "hallucination-resistance"]
+    assertions:
+      - type: answer_not_empty
+      # The answer should NOT confidently claim benchmark numbers that aren't in the KB
+      - type: not_contains
+        strings: ["GPT-5 scored", "benchmark result is", "achieved a score of"]
+      # Latency-only: no faithfulness check needed since we expect uncertainty expression
+      - type: retrieval_attempts_max
+        max: 3

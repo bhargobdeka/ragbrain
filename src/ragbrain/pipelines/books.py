@@ -172,6 +172,13 @@ class BooksPipeline:
         self._ingestor = IngestionPipeline(user_id=user_id)
         self._state_file = Path(settings.book_state_file)
 
+    def close(self) -> None:
+        """Close underlying ingestion resources."""
+        try:
+            self._ingestor.close()
+        except Exception:
+            pass
+
     def ingest_book(self, pdf_path: str) -> int:
         """Index a PDF book into Qdrant and register it in the lesson tracker.
 

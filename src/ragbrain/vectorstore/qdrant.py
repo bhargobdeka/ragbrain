@@ -88,7 +88,7 @@ class QdrantStore:
 
         if settings.qdrant_mode == "local":
             import os
-            local_path = settings.qdrant_local_path
+            local_path = os.path.expanduser(settings.qdrant_local_path)
             os.makedirs(local_path, exist_ok=True)
             self._client = QdrantClient(path=local_path)
         else:
@@ -96,6 +96,30 @@ class QdrantStore:
                 url=url or settings.qdrant_url,
                 api_key=api_key or settings.qdrant_api_key or None,
             )
+
+    def close(self) -> None:
+        """Close the underlying Qdrant client safely.
+
+        Calling this prevents noisy interpreter-shutdown tracebacks from
+        qdrant-client's internal __del__ handlers.
+        """
+        client = getattr(self, "_client", None)
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:
+            # Avoid surfacing destructor-time shutdown noise to users.
+            pass
+        finally:
+            self._client = None  # type: ignore[assignment]
+
+    def __del__(self) -> None:
+        """Best-effort cleanup."""
+        try:
+            self.close()
+        except Exception:
+            pass
 
     # ---- Collection management ----------------------------------------
 
@@ -203,10 +227,9 @@ class QdrantStore:
 
     def _upsert_dual(self, chunks: list[Chunk], collection: str, batch_size: int) -> None:
         """Upsert with named 'text' and 'code' vectors per chunk."""
-        from ragbrain.vectorstore.encoders import CodeEncoder, TextEncoder
+        from ragbrain.vectorstore.encoders import TextEncoder
 
         text_enc = TextEncoder.get()
-        code_enc = CodeEncoder.get()
 
         texts = [c.content for c in chunks]
 
@@ -220,13 +243,23 @@ class QdrantStore:
         code_vecs: list[list[float]] = list(text_vecs)
         code_indices = [i for i, c in enumerate(chunks) if c.block_type == BlockType.CODE]
         if code_indices:
+            from ragbrain.vectorstore.encoders import CodeEncoder
             code_texts = [chunks[i].content for i in code_indices]
-            encoded_code: list[list[float]] = []
-            for i in range(0, len(code_texts), batch_size):
-                vecs = code_enc.encode(code_texts[i: i + batch_size])
-                encoded_code.extend(vecs.tolist())
-            for j, idx in enumerate(code_indices):
-                code_vecs[idx] = encoded_code[j]
+            try:
+                code_enc = CodeEncoder.get()
+                encoded_code: list[list[float]] = []
+                for i in range(0, len(code_texts), batch_size):
+                    vecs = code_enc.encode(code_texts[i: i + batch_size])
+                    encoded_code.extend(vecs.tolist())
+                for j, idx in enumerate(code_indices):
+                    code_vecs[idx] = encoded_code[j]
+            except Exception as exc:
+                warnings.warn(
+                    "Failed to load/use code embedding model "
+                    f"({settings.code_embedding_model}): {exc}. "
+                    "Falling back to text embeddings for code vectors.",
+                    stacklevel=3,
+                )
 
         points = [
             qmodels.PointStruct(
