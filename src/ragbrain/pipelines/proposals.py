@@ -56,19 +56,23 @@ class Proposal:
         return f"[{self.priority}] {self.title} ({self.component})"
 
     def telegram_detail(self) -> str:
-        """Mobile-friendly detail block for Telegram."""
+        """Mobile-friendly detail block for Telegram (HTML parse_mode safe)."""
+        def _esc(text: str) -> str:
+            """Escape <, >, & in user-supplied text to avoid Telegram parse errors."""
+            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
         lines = [
-            f"<b>{self.title}</b>",
-            f"<i>Component:</i> {self.component}  |  <i>Priority:</i> {self.priority}",
+            f"<b>{_esc(self.title)}</b>",
+            f"<i>Component:</i> {_esc(self.component)}  |  <i>Priority:</i> {self.priority}",
             "",
-            f"<i>Why:</i> {self.description}",
+            f"<i>Why:</i> {_esc(self.description)}",
             "",
         ]
         if self.news_signal:
-            lines += [f"<i>Triggered by:</i> {self.news_signal[:200]}", ""]
+            lines += [f"<i>Triggered by:</i> {_esc(self.news_signal[:200])}", ""]
         lines += [
             "<i>Implementation plan:</i>",
-            self.implementation_plan[:600],
+            _esc(self.implementation_plan[:600]),
         ]
         return "\n".join(lines)
 
