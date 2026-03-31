@@ -11,6 +11,7 @@ Commands:
   ragbrain review-architecture        Run the self-improvement architecture review
   ragbrain plan-upgrades              Run the Deep Agents upgrade planner
   ragbrain run-automation             Run the full daily automation loop right now
+  ragbrain serve-slack                Start Slack approval poller + scheduler
   ragbrain eval                       Run quality evaluation suites
   ragbrain tracing                    Show LangSmith tracing status
 """
@@ -624,18 +625,15 @@ def run_automation(
                             title="[bold]Daily Briefing Preview[/bold]",
                             border_style="blue"))
 
-        if not dry_run and _s.telegram_bot_token and _s.telegram_chat_id:
-            import asyncio
-            from ragbrain.scheduler import _send_telegram
-            asyncio.run(_send_telegram(briefing))
-            console.print("  [green]✓[/green] Briefing sent to Telegram.")
-        elif dry_run:
-            console.print("  [dim]Dry-run: Telegram send skipped.[/dim]")
+        if not dry_run:
+            from ragbrain.delivery.slack_delivery import post_briefing
+            ok = post_briefing(briefing)
+            if ok:
+                console.print("  [green]✓[/green] Briefing sent to Slack.")
+            else:
+                console.print("  [yellow]Slack not configured — briefing printed above only.[/yellow]")
         else:
-            console.print(
-                "  [yellow]Telegram not configured — skipping send.[/yellow]\n"
-                "  Set RAGBRAIN_TELEGRAM_BOT_TOKEN and RAGBRAIN_TELEGRAM_CHAT_ID in .env"
-            )
+            console.print("  [dim]Dry-run: Slack send skipped.[/dim]")
     except Exception as e:
         console.print(f"  [red]Briefing failed:[/red] {e}")
 
@@ -669,19 +667,22 @@ def run_automation(
                         f"  [green]✓[/green] Proposal #{proposal.id}: [{proposal.priority}] {proposal.title[:60]}"
                     )
 
-                    if not dry_run and _s.telegram_bot_token and _s.telegram_chat_id:
-                        import asyncio
-                        from ragbrain.scheduler import _send_proposal_telegram
-                        asyncio.run(_send_proposal_telegram(proposal))
-                        sent += 1
+                    if not dry_run:
+                        from ragbrain.delivery.slack_delivery import post_proposal
+                        ok = post_proposal(proposal)
+                        if ok:
+                            sent += 1
 
                 if sent:
-                    console.print(f"\n  [green]✓[/green] {sent} proposal(s) sent to Telegram with Approve/Skip/Explain buttons.")
+                    console.print(
+                        f"\n  [green]✓[/green] {sent} proposal(s) sent to Slack.\n"
+                        f"  Reply [cyan]approve <id>[/cyan] / [cyan]skip <id>[/cyan] / [cyan]explain <id>[/cyan] in Slack."
+                    )
                 elif dry_run:
-                    console.print("  [dim]Dry-run: Telegram send skipped.[/dim]")
+                    console.print("  [dim]Dry-run: Slack send skipped.[/dim]")
                 else:
                     console.print(
-                        "  [yellow]Proposals saved locally. Set Telegram credentials to send buttons.[/yellow]"
+                        "  [yellow]Proposals saved locally. Check RAGBRAIN_SLACK_BOT_TOKEN in .env.[/yellow]"
                     )
         except Exception as e:
             console.print(f"  [red]Upgrade planner failed:[/red] {e}")
@@ -694,10 +695,90 @@ def run_automation(
         f"Slack messages ingested: [bold]{ingested_count}[/bold]\n"
         f"Briefing generated:      [bold]{'yes' if briefing else 'no'}[/bold]\n"
         f"Proposals stored:        see [cyan]~/.ragbrain/proposals.json[/cyan]\n\n"
-        f"[dim]Run [cyan]ragbrain serve[/cyan] to start the Telegram bot and process approvals.[/dim]",
+        f"[dim]Reply [cyan]approve <id>[/cyan] / [cyan]skip <id>[/cyan] in Slack to act on proposals.\n"
+        f"Run [cyan]ragbrain serve-slack[/cyan] to start the approval poller.[/dim]",
         title="[bold]Automation Run Complete[/bold]",
         border_style="green",
     ))
+
+
+# ---- serve-slack --------------------------------------------------------
+
+@app.command(name="serve-slack")
+def serve_slack(
+    poll_interval: int = typer.Option(15, "--poll", help="Seconds between approval polls"),
+    with_scheduler: bool = typer.Option(True, "--scheduler/--no-scheduler",
+                                        help="Also run the cron scheduler in the background"),
+) -> None:
+    """Start the Slack approval poller (and optionally the scheduler).
+
+    This is your single command for leaving the Mac unattended.
+    It does two things in parallel:
+
+    1. Watches the Slack DM channel every N seconds for messages like:
+         approve <id>   → triggers AutoImplementer on the approved proposal
+         skip <id>      → marks the proposal as skipped
+         explain <id>   → posts the full proposal details back to Slack
+
+    2. (Optional) Runs the full cron scheduler so daily briefings and
+       upgrade proposals are posted automatically at the configured times.
+
+    Usage:
+      ragbrain serve-slack                    # poller + scheduler
+      ragbrain serve-slack --no-scheduler     # poller only
+      ragbrain serve-slack --poll 30          # check every 30 seconds
+    """
+    from ragbrain.config import settings as _s
+
+    if not _s.slack_bot_token or not (_s.slack_post_channel_id or _s.slack_channel_id):
+        console.print(
+            "[red]Slack not configured.[/red]\n\n"
+            "Add these to your [cyan].env[/cyan]:\n"
+            "  RAGBRAIN_SLACK_BOT_TOKEN=xoxb-...\n"
+            "  RAGBRAIN_SLACK_CHANNEL_ID=<channel or DM ID>",
+        )
+        raise typer.Exit(1)
+
+    if not _s.automation_enabled:
+        console.print(
+            "[yellow]RAGBRAIN_AUTOMATION_ENABLED is false.[/yellow]\n"
+            "Approval poller will run, but the scheduler won't send daily automation jobs.\n"
+            "Add RAGBRAIN_AUTOMATION_ENABLED=true to your .env to enable the full loop.\n"
+        )
+
+    console.print(Panel(
+        f"Slack channel:   [cyan]{_s.slack_post_channel_id or _s.slack_channel_id}[/cyan]\n"
+        f"Poll interval:   [bold]{poll_interval}s[/bold]\n"
+        f"Scheduler:       [bold]{'yes' if with_scheduler else 'no'}[/bold]\n"
+        f"Automation:      [bold]{'ENABLED' if _s.automation_enabled else 'DISABLED'}[/bold]\n\n"
+        f"Reply in Slack:\n"
+        f"  [cyan]approve <id>[/cyan] — implement the proposal\n"
+        f"  [cyan]skip <id>[/cyan]    — skip the proposal\n"
+        f"  [cyan]explain <id>[/cyan] — show full proposal details",
+        title="[bold]RAGBrain Slack Bot[/bold]",
+        border_style="cyan",
+    ))
+
+    if with_scheduler:
+        import threading
+        from ragbrain.scheduler import run_scheduler
+
+        def _run_sched():
+            try:
+                run_scheduler()
+            except Exception:
+                logger.exception("Scheduler crashed")
+
+        t = threading.Thread(target=_run_sched, daemon=True, name="ragbrain-scheduler")
+        t.start()
+        console.print("[dim]Scheduler started in background thread.[/dim]\n")
+
+    # Run the approval poller in the main thread (blocking)
+    try:
+        from ragbrain.delivery.slack_delivery import run_approval_loop
+        run_approval_loop(poll_interval=poll_interval)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Slack bot stopped.[/yellow]")
 
 
 # ---- tracing --------------------------------------------------------

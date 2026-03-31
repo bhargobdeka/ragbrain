@@ -161,11 +161,12 @@ def daily_automation_job() -> None:
 
     # ---- Step 2: Daily briefing -------------------------------------
     try:
+        from ragbrain.delivery.slack_delivery import post_briefing
         from ragbrain.pipelines.daily_briefing import generate_daily_briefing
 
         briefing = generate_daily_briefing()
-        asyncio.run(_send_telegram(briefing))
-        logger.info("Daily briefing sent to Telegram.")
+        post_briefing(briefing)
+        logger.info("Daily briefing sent to Slack.")
     except Exception:
         logger.exception("Daily briefing failed in daily_automation_job")
 
@@ -195,10 +196,10 @@ def daily_automation_job() -> None:
             )
             store.add(proposal)
 
-            if token and chat_id:
-                asyncio.run(_send_proposal_telegram(proposal))
+            from ragbrain.delivery.slack_delivery import post_proposal
+            post_proposal(proposal)
 
-        logger.info("Sent %d proposals to Telegram.", min(len(recs), 3))
+        logger.info("Sent %d proposals to Slack.", min(len(recs), 3))
     except Exception:
         logger.exception("Upgrade planner failed in daily_automation_job")
 
@@ -211,11 +212,12 @@ def architecture_snapshot_job() -> None:
 
     logger.info("Running architecture snapshot job...")
     try:
+        from ragbrain.delivery.slack_delivery import post_briefing
         from ragbrain.pipelines.daily_briefing import architecture_snapshot
 
         snapshot = architecture_snapshot()
-        asyncio.run(_send_telegram(snapshot))
-        logger.info("Architecture snapshot sent to Telegram.")
+        post_briefing(snapshot)
+        logger.info("Architecture snapshot sent to Slack.")
     except Exception:
         logger.exception("Architecture snapshot job failed")
 
