@@ -10,6 +10,7 @@ Commands:
   ragbrain ingest-slack               Ingest recent Slack news into knowledge base
   ragbrain review-architecture        Run the self-improvement architecture review
   ragbrain plan-upgrades              Run the Deep Agents upgrade planner
+  ragbrain slack-setup                Find bot DM channel and write to .env
   ragbrain run-automation             Run the full daily automation loop right now
   ragbrain serve-slack                Start Slack approval poller + scheduler
   ragbrain eval                       Run quality evaluation suites
@@ -714,6 +715,131 @@ def run_automation(
         f"[dim]Reply [cyan]approve <id>[/cyan] / [cyan]skip <id>[/cyan] in Slack to act on proposals.\n"
         f"Run [cyan]ragbrain serve-slack[/cyan] to start the approval poller.[/dim]",
         title="[bold]Automation Run Complete[/bold]",
+        border_style="green",
+    ))
+
+
+# ---- slack-setup --------------------------------------------------------
+
+@app.command(name="slack-setup")
+def slack_setup() -> None:
+    """Find the bot's own DM channel and write it to .env.
+
+    The problem:
+      Your news channel (RAGBRAIN_SLACK_CHANNEL_ID) is a DM with Tuk.
+      The bot can *post* there but cannot *read* your replies — so
+      approve/skip commands typed there are invisible to RAGBrain.
+
+    The fix:
+      RAGBrain needs its own DM channel with you, where it's a participant
+      and can read your messages.  This command finds that channel ID and
+      adds RAGBRAIN_SLACK_BOT_CHANNEL_ID to your .env automatically.
+
+    How to run:
+      1. In Slack, find your RAGBrain bot (search for its app name)
+      2. Click 'Message' to open a DM with the bot — send any message
+      3. Run this command — it will detect the DM and update .env
+    """
+    from ragbrain.config import settings as _s
+
+    if not _s.slack_bot_token:
+        console.print("[red]RAGBRAIN_SLACK_BOT_TOKEN not set in .env[/red]")
+        raise typer.Exit(1)
+
+    import ssl
+    import certifi
+    from slack_sdk import WebClient
+
+    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    client = WebClient(token=_s.slack_bot_token, ssl=ssl_ctx)
+
+    console.print("[cyan]Looking up bot identity...[/cyan]")
+    try:
+        auth = client.auth_test()
+        bot_user_id = auth["user_id"]
+        bot_name = auth.get("user", "ragbrain-bot")
+        console.print(f"  Bot: [bold]{bot_name}[/bold]  (user_id={bot_user_id})")
+    except Exception as e:
+        console.print(f"[red]auth.test failed:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print("[cyan]Searching for DM channels the bot is in...[/cyan]")
+    try:
+        # im.list returns all DMs opened with this bot
+        resp = client.conversations_list(types="im", limit=200)
+        ims = resp.get("channels", [])
+    except Exception as e:
+        console.print(f"[red]conversations.list failed:[/red] {e}")
+        raise typer.Exit(1)
+
+    if not ims:
+        console.print(
+            "\n[yellow]No DM channels found for this bot.[/yellow]\n\n"
+            "To fix this:\n"
+            "  1. Open Slack on your phone or desktop\n"
+            "  2. Search for your bot (by its app name)\n"
+            "  3. Tap 'Message' and send any message (e.g. 'hello')\n"
+            "  4. Run [cyan]ragbrain slack-setup[/cyan] again\n"
+        )
+        raise typer.Exit(1)
+
+    # Find the most recently active DM (most likely the one the user just opened)
+    latest_im = max(ims, key=lambda c: float(c.get("last_read", "0") or "0"))
+    bot_channel_id = latest_im["id"]
+
+    console.print(f"\n  [green]✓[/green] Found bot DM channel: [bold cyan]{bot_channel_id}[/bold cyan]")
+
+    # Send a test message so the user can verify in Slack
+    try:
+        client.chat_postMessage(
+            channel=bot_channel_id,
+            text=(
+                "👋 *RAGBrain is set up!*\n\n"
+                "This is your control channel. Reply here to act on proposals:\n"
+                "  • `approve <id>` — implement a proposal\n"
+                "  • `skip <id>` — skip a proposal\n"
+                "  • `explain <id>` — show full proposal details\n\n"
+                "Start the bot with: `ragbrain serve-slack`"
+            ),
+            mrkdwn=True,
+        )
+        console.print("  [green]✓[/green] Test message sent — check Slack to confirm.")
+    except Exception as e:
+        console.print(f"  [yellow]Could not send test message:[/yellow] {e}")
+
+    # Write to .env
+    env_path = Path(".env")
+    if env_path.exists():
+        env_text = env_path.read_text(encoding="utf-8")
+        if "RAGBRAIN_SLACK_BOT_CHANNEL_ID=" in env_text:
+            # Update existing line
+            import re
+            env_text = re.sub(
+                r"RAGBRAIN_SLACK_BOT_CHANNEL_ID=.*",
+                f"RAGBRAIN_SLACK_BOT_CHANNEL_ID={bot_channel_id}",
+                env_text,
+            )
+        else:
+            # Append after RAGBRAIN_SLACK_CHANNEL_ID line
+            env_text = env_text.replace(
+                f"RAGBRAIN_SLACK_CHANNEL_ID={_s.slack_channel_id}",
+                f"RAGBRAIN_SLACK_CHANNEL_ID={_s.slack_channel_id}\n"
+                f"RAGBRAIN_SLACK_BOT_CHANNEL_ID={bot_channel_id}",
+            )
+        env_path.write_text(env_text, encoding="utf-8")
+        console.print(f"  [green]✓[/green] Updated [cyan].env[/cyan]: RAGBRAIN_SLACK_BOT_CHANNEL_ID={bot_channel_id}")
+    else:
+        console.print(
+            f"\n[yellow].env not found — add this manually:[/yellow]\n"
+            f"  RAGBRAIN_SLACK_BOT_CHANNEL_ID={bot_channel_id}"
+        )
+
+    console.print(Panel(
+        f"Bot DM channel: [bold cyan]{bot_channel_id}[/bold cyan]\n\n"
+        "RAGBrain will now post briefings and proposals to this DM.\n"
+        "Reply [cyan]approve <id>[/cyan] / [cyan]skip <id>[/cyan] to act on proposals.\n\n"
+        "Next step: run [bold cyan]ragbrain serve-slack[/bold cyan]",
+        title="[bold green]Slack Setup Complete[/bold green]",
         border_style="green",
     ))
 

@@ -88,8 +88,14 @@ class Settings(BaseSettings):
 
     # ---- Slack (for reading AI news + posting review output) ------
     slack_bot_token: str = ""
-    slack_channel_id: str = ""      # DM or channel ID where news arrives
-    slack_post_channel_id: str = "" # where to post review results (defaults to same)
+    slack_channel_id: str = ""      # channel/DM where AI news arrives (read-only for ingestion)
+    slack_post_channel_id: str = "" # where to post review results (defaults to slack_channel_id)
+    # Bot interaction channel — where RAGBrain posts briefings/proposals
+    # AND polls for your approve/skip replies.  Must be a channel/DM that
+    # the bot is a MEMBER of (not just a channel it can write to).
+    # Leave blank to fall back to slack_post_channel_id / slack_channel_id.
+    # Run `ragbrain slack-setup` to find and set this automatically.
+    slack_bot_channel_id: str = ""
     slack_lookback_hours: int = 24
 
     # ---- Article pipeline ------------------------------------------

@@ -50,8 +50,23 @@ def _build_client():
     return WebClient(token=settings.slack_bot_token, ssl=ssl_ctx)
 
 
+def _bot_channel() -> str:
+    """Channel where the bot sends messages to the user AND polls for replies.
+
+    This must be a channel/DM the bot is a MEMBER of, so it can read replies.
+    Priority: slack_bot_channel_id → slack_post_channel_id → slack_channel_id.
+    Run `ragbrain slack-setup` to auto-configure this.
+    """
+    return (
+        settings.slack_bot_channel_id
+        or settings.slack_post_channel_id
+        or settings.slack_channel_id
+    )
+
+
 def _channel() -> str:
-    return settings.slack_post_channel_id or settings.slack_channel_id
+    """Legacy helper — uses bot channel."""
+    return _bot_channel()
 
 
 # ---- Posting helpers -----------------------------------------------------
@@ -193,12 +208,12 @@ _SEEN_TS: set[str] = set()   # timestamps already processed this session
 
 
 def poll_and_process_approvals() -> int:
-    """Scan recent DM messages for approve/skip/explain commands.
+    """Scan recent bot-channel messages for approve/skip/explain commands.
 
     Processes each new matching message once and returns the count handled.
     Call this in a loop to continuously watch for approvals.
     """
-    if not settings.slack_bot_token or not _channel():
+    if not settings.slack_bot_token or not _bot_channel():
         return 0
 
     from ragbrain.pipelines.proposals import get_store
@@ -206,7 +221,7 @@ def poll_and_process_approvals() -> int:
     processed = 0
     try:
         client = _build_client()
-        resp = client.conversations_history(channel=_channel(), limit=20)
+        resp = client.conversations_history(channel=_bot_channel(), limit=20)
         messages = resp.get("messages", [])
     except Exception:
         logger.exception("Failed to fetch Slack history for approval polling")
