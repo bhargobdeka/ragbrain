@@ -714,17 +714,21 @@ def run_automation(
 
             _PLANNER_TIMEOUT = 180  # 3 minutes max — never block vacation runs
             with console.status("Planning upgrades with Deep Agents..."):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
-                    _fut = _ex.submit(get_upgrade_recommendations)
-                    try:
-                        recs = _fut.result(timeout=_PLANNER_TIMEOUT)
-                    except concurrent.futures.TimeoutError:
-                        console.print(
-                            f"  [yellow]UpgradePlanner timed out after {_PLANNER_TIMEOUT}s "
-                            f"— skipping proposals for today.[/yellow]\n"
-                            "  [dim](Briefing was already sent successfully.)[/dim]"
-                        )
-                        recs = []
+                _ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                _fut = _ex.submit(get_upgrade_recommendations)
+                try:
+                    recs = _fut.result(timeout=_PLANNER_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    recs = []
+                    console.print(
+                        f"  [yellow]UpgradePlanner timed out after {_PLANNER_TIMEOUT}s "
+                        f"— skipping proposals for today.[/yellow]\n"
+                        "  [dim](Briefing was already sent successfully.)[/dim]"
+                    )
+                finally:
+                    # wait=False — let the background thread die on its own;
+                    # don't block the main process waiting for it to finish.
+                    _ex.shutdown(wait=False)
 
             if not recs:
                 console.print("  [yellow]No recommendations returned.[/yellow]")

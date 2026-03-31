@@ -188,13 +188,15 @@ def daily_automation_job() -> None:
         from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
 
         _PLANNER_TIMEOUT = 180  # 3 minutes max — never block the daily job
-        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-            _fut = _ex.submit(get_upgrade_recommendations)
-            try:
-                recs = _fut.result(timeout=_PLANNER_TIMEOUT)
-            except _cf.TimeoutError:
-                logger.warning("UpgradePlanner timed out after %ds — skipping proposals.", _PLANNER_TIMEOUT)
-                recs = []
+        _ex = _cf.ThreadPoolExecutor(max_workers=1)
+        _fut = _ex.submit(get_upgrade_recommendations)
+        try:
+            recs = _fut.result(timeout=_PLANNER_TIMEOUT)
+        except _cf.TimeoutError:
+            logger.warning("UpgradePlanner timed out after %ds — skipping proposals.", _PLANNER_TIMEOUT)
+            recs = []
+        finally:
+            _ex.shutdown(wait=False)  # don't block — let thread die on its own
 
         if not recs:
             logger.info("UpgradePlanner returned no recommendations.")
