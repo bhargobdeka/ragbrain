@@ -643,14 +643,30 @@ def run_automation(
                             border_style="blue"))
 
         if not dry_run:
+            sent_any = False
+            # Try Slack first
             from ragbrain.delivery.slack_delivery import post_briefing
-            ok = post_briefing(briefing)
-            if ok:
-                console.print("  [green]✓[/green] Briefing sent to Slack.")
-            else:
-                console.print("  [yellow]Slack not configured — briefing printed above only.[/yellow]")
+            if _s.slack_bot_token and (_s.slack_bot_channel_id or _s.slack_post_channel_id or _s.slack_channel_id):
+                ok = post_briefing(briefing)
+                if ok:
+                    console.print("  [green]✓[/green] Briefing sent to Slack.")
+                    sent_any = True
+            # Try Telegram
+            if _s.telegram_bot_token and _s.telegram_chat_id:
+                import asyncio, re as _re
+                plain = _re.sub(r"<[^>]+>", "", briefing)
+                from ragbrain.scheduler import _send_telegram
+                asyncio.run(_send_telegram(plain))
+                console.print("  [green]✓[/green] Briefing sent to Telegram.")
+                sent_any = True
+            if not sent_any:
+                console.print(
+                    "  [yellow]No delivery channel configured.[/yellow]\n"
+                    "  Run [cyan]ragbrain telegram-setup[/cyan] to connect Telegram (recommended),\n"
+                    "  or [cyan]ragbrain slack-setup[/cyan] for Slack."
+                )
         else:
-            console.print("  [dim]Dry-run: Slack send skipped.[/dim]")
+            console.print("  [dim]Dry-run: send skipped.[/dim]")
     except Exception as e:
         console.print(f"  [red]Briefing failed:[/red] {e}")
 
@@ -685,21 +701,37 @@ def run_automation(
                     )
 
                     if not dry_run:
-                        from ragbrain.delivery.slack_delivery import post_proposal
-                        ok = post_proposal(proposal)
-                        if ok:
+                        # Send to Telegram (preferred — inline approve/skip buttons)
+                        if _s.telegram_bot_token and _s.telegram_chat_id:
+                            import asyncio
+                            from ragbrain.delivery.telegram import send_proposal as tg_send
+                            from telegram import Bot
+                            async def _tg():
+                                async with Bot(token=_s.telegram_bot_token) as bot:
+                                    await tg_send(bot, int(_s.telegram_chat_id), proposal)
+                            asyncio.run(_tg())
                             sent += 1
+                        # Also send to Slack if configured (text-based)
+                        elif _s.slack_bot_token and (_s.slack_bot_channel_id or _s.slack_channel_id):
+                            from ragbrain.delivery.slack_delivery import post_proposal
+                            if post_proposal(proposal):
+                                sent += 1
 
                 if sent:
+                    channels = []
+                    if _s.telegram_bot_token and _s.telegram_chat_id:
+                        channels.append("[cyan]Telegram[/cyan] (tap Approve/Skip buttons)")
+                    if _s.slack_bot_token and (_s.slack_bot_channel_id or _s.slack_channel_id):
+                        channels.append("[cyan]Slack[/cyan] (reply approve <id>)")
                     console.print(
-                        f"\n  [green]✓[/green] {sent} proposal(s) sent to Slack.\n"
-                        f"  Reply [cyan]approve <id>[/cyan] / [cyan]skip <id>[/cyan] / [cyan]explain <id>[/cyan] in Slack."
+                        f"\n  [green]✓[/green] {sent} proposal(s) sent to {' + '.join(channels) or 'delivery channel'}."
                     )
                 elif dry_run:
-                    console.print("  [dim]Dry-run: Slack send skipped.[/dim]")
+                    console.print("  [dim]Dry-run: send skipped.[/dim]")
                 else:
                     console.print(
-                        "  [yellow]Proposals saved locally. Check RAGBRAIN_SLACK_BOT_TOKEN in .env.[/yellow]"
+                        "  [yellow]Proposals saved locally. No delivery channel configured.[/yellow]\n"
+                        "  Run [cyan]ragbrain telegram-setup[/cyan] to connect Telegram."
                     )
         except Exception as e:
             console.print(f"  [red]Upgrade planner failed:[/red] {e}")
@@ -708,13 +740,177 @@ def run_automation(
 
     # ---- Summary -------------------------------------------------------
     console.print()
+    from ragbrain.config import settings as _sf
+    _has_tg = bool(_sf.telegram_bot_token and _sf.telegram_chat_id)
+    _has_slack = bool(_sf.slack_bot_token and (_sf.slack_bot_channel_id or _sf.slack_channel_id))
+    if _has_tg:
+        _next_step = "Run [cyan]ragbrain serve[/cyan] to handle Telegram Approve/Skip button taps."
+    elif _has_slack:
+        _next_step = "Reply [cyan]approve <id>[/cyan] in Slack. Run [cyan]ragbrain serve-slack[/cyan]."
+    else:
+        _next_step = "Run [cyan]ragbrain telegram-setup[/cyan] to connect a delivery channel."
+
     console.print(Panel(
         f"Slack messages ingested: [bold]{ingested_count}[/bold]\n"
         f"Briefing generated:      [bold]{'yes' if briefing else 'no'}[/bold]\n"
-        f"Proposals stored:        see [cyan]~/.ragbrain/proposals.json[/cyan]\n\n"
-        f"[dim]Reply [cyan]approve <id>[/cyan] / [cyan]skip <id>[/cyan] in Slack to act on proposals.\n"
-        f"Run [cyan]ragbrain serve-slack[/cyan] to start the approval poller.[/dim]",
+        f"Proposals stored:        [cyan]~/.ragbrain/proposals.json[/cyan]\n\n"
+        f"[dim]{_next_step}[/dim]",
         title="[bold]Automation Run Complete[/bold]",
+        border_style="green",
+    ))
+
+
+# ---- telegram-setup --------------------------------------------------------
+
+@app.command(name="telegram-setup")
+def telegram_setup() -> None:
+    """Interactive guide to connect your Telegram bot for approvals.
+
+    Takes about 5 minutes. At the end you will have:
+      - A Telegram bot that receives briefings and proposal buttons
+      - RAGBRAIN_TELEGRAM_BOT_TOKEN and RAGBRAIN_TELEGRAM_CHAT_ID in .env
+      - approve / skip / explain buttons that work from your phone anywhere
+
+    Steps (follow the prompts):
+      1. Create a bot via @BotFather in Telegram
+      2. Paste the token here
+      3. Start a chat with your bot and press Enter
+      4. Your Chat ID is found automatically and saved to .env
+    """
+    console.print(Panel(
+        "[bold]Telegram bot setup — ~5 minutes[/bold]\n\n"
+        "You'll need the Telegram app open on your phone or desktop.\n"
+        "This only needs to be done once.",
+        title="[bold cyan]RAGBrain × Telegram[/bold cyan]",
+        border_style="cyan",
+    ))
+
+    # ---- Step 1: Get bot token -------------------------------------------
+    console.print("\n[bold]Step 1 — Create a bot[/bold]")
+    console.print(
+        "  1. Open Telegram and search for [cyan]@BotFather[/cyan]\n"
+        "  2. Send: [cyan]/newbot[/cyan]\n"
+        "  3. Follow the prompts (name + username, e.g. [dim]RAGBrain / ragbrain_myname_bot[/dim])\n"
+        "  4. BotFather will give you a token like: [dim]7123456789:AAH...[/dim]\n"
+    )
+    token = typer.prompt("  Paste your bot token here").strip()
+
+    if not token or ":" not in token:
+        console.print("[red]That doesn't look like a valid token (expected format: 123456:ABC...)[/red]")
+        raise typer.Exit(1)
+
+    # Verify the token works
+    console.print("\n  Verifying token...")
+    try:
+        import requests
+        r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+        data = r.json()
+        if not data.get("ok"):
+            console.print(f"[red]Token rejected by Telegram:[/red] {data.get('description')}")
+            raise typer.Exit(1)
+        bot_name = data["result"].get("first_name", "")
+        bot_username = data["result"].get("username", "")
+        console.print(f"  [green]✓[/green] Bot verified: [bold]{bot_name}[/bold] (@{bot_username})")
+    except Exception as e:
+        console.print(f"[red]Could not reach Telegram API:[/red] {e}")
+        raise typer.Exit(1)
+
+    # ---- Step 2: Get chat ID -----------------------------------------------
+    console.print(
+        f"\n[bold]Step 2 — Start a chat with your bot[/bold]\n\n"
+        f"  1. In Telegram, search for [cyan]@{bot_username}[/cyan]\n"
+        f"  2. Tap [cyan]START[/cyan] or send any message (e.g. 'hello')\n"
+    )
+    typer.confirm("  Done? (press Enter after you've sent a message)", default=True)
+
+    # Poll getUpdates to find the chat ID
+    console.print("  Looking up your Chat ID...")
+    chat_id = ""
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{token}/getUpdates",
+            timeout=10,
+        )
+        updates = r.json().get("result", [])
+        if updates:
+            # Take the most recent message
+            last = updates[-1]
+            msg = last.get("message") or last.get("my_chat_member", {})
+            chat = msg.get("chat", {}) if isinstance(msg, dict) else {}
+            chat_id = str(chat.get("id", ""))
+
+        if not chat_id:
+            console.print(
+                "[yellow]Could not auto-detect Chat ID.[/yellow]\n\n"
+                "Manual alternative:\n"
+                f"  Visit: https://api.telegram.org/bot{token}/getUpdates\n"
+                "  Look for: result[0].message.chat.id\n"
+                "  It's a number like 123456789 (or negative for groups)\n"
+            )
+            chat_id = typer.prompt("  Paste your Chat ID manually").strip()
+        else:
+            console.print(f"  [green]✓[/green] Chat ID found: [bold cyan]{chat_id}[/bold cyan]")
+    except Exception as e:
+        console.print(f"[red]Could not fetch updates:[/red] {e}")
+        chat_id = typer.prompt("  Paste your Chat ID manually").strip()
+
+    if not chat_id:
+        console.print("[red]Chat ID is required.[/red]")
+        raise typer.Exit(1)
+
+    # ---- Step 3: Write to .env --------------------------------------------
+    env_path = Path(".env")
+    import re as _re
+    if env_path.exists():
+        env_text = env_path.read_text(encoding="utf-8")
+        # Update or append BOT_TOKEN
+        if "RAGBRAIN_TELEGRAM_BOT_TOKEN=" in env_text:
+            env_text = _re.sub(r"RAGBRAIN_TELEGRAM_BOT_TOKEN=.*", f"RAGBRAIN_TELEGRAM_BOT_TOKEN={token}", env_text)
+        else:
+            env_text += f"\nRAGBRAIN_TELEGRAM_BOT_TOKEN={token}\n"
+        # Update or append CHAT_ID
+        if "RAGBRAIN_TELEGRAM_CHAT_ID=" in env_text:
+            env_text = _re.sub(r"RAGBRAIN_TELEGRAM_CHAT_ID=.*", f"RAGBRAIN_TELEGRAM_CHAT_ID={chat_id}", env_text)
+        else:
+            env_text += f"RAGBRAIN_TELEGRAM_CHAT_ID={chat_id}\n"
+        env_path.write_text(env_text, encoding="utf-8")
+        console.print(f"\n  [green]✓[/green] Saved to [cyan].env[/cyan]")
+    else:
+        console.print(
+            f"\n[yellow].env not found — add these manually:[/yellow]\n"
+            f"  RAGBRAIN_TELEGRAM_BOT_TOKEN={token}\n"
+            f"  RAGBRAIN_TELEGRAM_CHAT_ID={chat_id}"
+        )
+
+    # ---- Step 4: Send test message ----------------------------------------
+    try:
+        import requests
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": (
+                    "👋 *RAGBrain is connected\\!*\n\n"
+                    "You'll receive daily briefings and upgrade proposals here\\.\n"
+                    "Tap *Approve*, *Skip*, or *Explain* on each proposal\\.\n\n"
+                    "Run `ragbrain serve` to start the bot\\."
+                ),
+                "parse_mode": "MarkdownV2",
+            },
+            timeout=10,
+        )
+        console.print("  [green]✓[/green] Test message sent — check Telegram!")
+    except Exception as e:
+        console.print(f"  [yellow]Could not send test message:[/yellow] {e}")
+
+    console.print(Panel(
+        f"Bot: [bold]@{bot_username}[/bold]\n"
+        f"Chat ID: [bold cyan]{chat_id}[/bold cyan]\n\n"
+        "Next step: run [bold cyan]ragbrain serve[/bold cyan]\n"
+        "  This starts the bot and handles Approve/Skip button taps.\n\n"
+        "To send proposals to Telegram, run:\n"
+        "  [cyan]ragbrain run-automation[/cyan]",
+        title="[bold green]Telegram Setup Complete[/bold green]",
         border_style="green",
     ))
 

@@ -164,12 +164,20 @@ def daily_automation_job() -> None:
 
     # ---- Step 2: Daily briefing -------------------------------------
     try:
-        from ragbrain.delivery.slack_delivery import post_briefing
+        import re as _re
         from ragbrain.pipelines.daily_briefing import generate_daily_briefing
 
         briefing = generate_daily_briefing()
-        post_briefing(briefing)
-        logger.info("Daily briefing sent to Slack.")
+
+        # Prefer Telegram (richer mobile experience)
+        if settings.telegram_bot_token and settings.telegram_chat_id:
+            plain = _re.sub(r"<[^>]+>", "", briefing)
+            asyncio.run(_send_telegram(plain))
+            logger.info("Daily briefing sent to Telegram.")
+        else:
+            from ragbrain.delivery.slack_delivery import post_briefing
+            post_briefing(briefing)
+            logger.info("Daily briefing sent to Slack.")
     except Exception:
         logger.exception("Daily briefing failed in daily_automation_job")
 
@@ -199,10 +207,14 @@ def daily_automation_job() -> None:
             )
             store.add(proposal)
 
-            from ragbrain.delivery.slack_delivery import post_proposal
-            post_proposal(proposal)
+            # Prefer Telegram (inline buttons) over Slack (text reply)
+            if settings.telegram_bot_token and settings.telegram_chat_id:
+                asyncio.run(_send_proposal_telegram(proposal))
+            elif settings.slack_bot_token:
+                from ragbrain.delivery.slack_delivery import post_proposal
+                post_proposal(proposal)
 
-        logger.info("Sent %d proposals to Slack.", min(len(recs), 3))
+        logger.info("Sent %d proposals to delivery channel.", min(len(recs), 3))
     except Exception:
         logger.exception("Upgrade planner failed in daily_automation_job")
 
