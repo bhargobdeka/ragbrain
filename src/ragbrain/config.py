@@ -126,19 +126,41 @@ class Settings(BaseSettings):
     def setup_tracing(self) -> bool:
         """Activate LangSmith tracing if LANGCHAIN_API_KEY is configured.
 
-        Sets the four LANGCHAIN_* env vars that LangChain reads automatically,
-        then returns True if tracing was enabled (key present + tracing=true).
+        Performs a quick 3-second TCP connectivity check to api.smith.langchain.com
+        before enabling tracing.  If the API is unreachable (network issue, timeout),
+        tracing is silently skipped rather than blocking every query indefinitely.
+
+        Returns True if tracing was successfully activated, False otherwise.
         Safe to call multiple times — idempotent.
         """
         import os
 
         if not self.langsmith_api_key:
             return False
+
+        # Quick reachability check — fail fast rather than hang.
+        import socket
+        import urllib.parse
+
+        host = urllib.parse.urlparse(self.langsmith_endpoint).hostname or "api.smith.langchain.com"
+        try:
+            sock = socket.create_connection((host, 443), timeout=3.0)
+            sock.close()
+        except OSError:
+            import logging
+            logging.getLogger(__name__).warning(
+                "LangSmith unreachable (%s:443) — tracing disabled for this run.", host
+            )
+            return False
+
         os.environ.setdefault("LANGCHAIN_API_KEY", self.langsmith_api_key)
         os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
         os.environ.setdefault("LANGCHAIN_PROJECT", self.langsmith_project)
         os.environ.setdefault("LANGCHAIN_ENDPOINT", self.langsmith_endpoint)
-        return os.environ.get("LANGCHAIN_TRACING_V2", "false").lower() == "true"
+        # Prevent trace-upload thread from blocking process exit.
+        os.environ.setdefault("LANGSMITH_TIMEOUT_SECS", "5")
+        os.environ.setdefault("LANGCHAIN_CALLBACKS_BACKGROUND", "true")
+        return True
 
     # ---- LLM factories ---------------------------------------------
 

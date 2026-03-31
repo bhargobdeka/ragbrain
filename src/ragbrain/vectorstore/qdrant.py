@@ -66,6 +66,50 @@ def _rrf_merge(result_lists: list[list[RetrievalResult]], top_k: int, k: int = 6
 
 
 # ---------------------------------------------------------------------------
+# Local client factory with stale-lock recovery
+# ---------------------------------------------------------------------------
+
+
+def _open_local_qdrant(local_path: str) -> "QdrantClient":
+    """Open a local QdrantClient, recovering automatically from a stale lock.
+
+    Qdrant uses portalocker to prevent two live processes from opening the same
+    data directory.  If a previous ragbrain process was hard-killed (SIGKILL,
+    OOM, etc.) it may leave a `.lock` file behind even though the OS has
+    already released the fcntl lock.  Portalocker's non-blocking mode then
+    raises RuntimeError on the next open attempt.
+
+    This helper catches that specific error, removes the orphaned lock file,
+    and retries once.  A genuinely live concurrent process will still cause the
+    retry to fail (the fcntl lock is still held), so we don't mask real
+    conflicts.
+    """
+    import logging
+    import os
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        return QdrantClient(path=local_path)
+    except RuntimeError as exc:
+        if "already accessed" not in str(exc):
+            raise
+
+        lock_file = os.path.join(local_path, ".lock")
+        if os.path.exists(lock_file):
+            logger.warning(
+                "Stale Qdrant lock at %s — removing and retrying. "
+                "(Safe when no other ragbrain process is running.)",
+                lock_file,
+            )
+            os.remove(lock_file)
+        else:
+            logger.warning("Qdrant lock conflict with no lock file — retrying.")
+
+        return QdrantClient(path=local_path)
+
+
+# ---------------------------------------------------------------------------
 # QdrantStore
 # ---------------------------------------------------------------------------
 
@@ -90,7 +134,7 @@ class QdrantStore:
             import os
             local_path = os.path.expanduser(settings.qdrant_local_path)
             os.makedirs(local_path, exist_ok=True)
-            self._client = QdrantClient(path=local_path)
+            self._client = _open_local_qdrant(local_path)
         else:
             self._client = QdrantClient(
                 url=url or settings.qdrant_url,

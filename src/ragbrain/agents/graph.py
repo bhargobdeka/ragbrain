@@ -24,7 +24,19 @@ from ragbrain.agents.state import RAGState
 from ragbrain.config import settings
 
 # Activate LangSmith tracing once at module load if key is configured.
-settings.setup_tracing()
+# The method checks connectivity first — if LangSmith is unreachable it
+# returns False and leaves LANGCHAIN_TRACING_V2 unset, preventing hangs.
+# Also clear any stale LANGCHAIN_TRACING_V2 the shell may have inherited
+# before we've had a chance to verify connectivity.
+import os as _os
+if _os.environ.get("LANGCHAIN_TRACING_V2", "").lower() == "true":
+    # Already set externally — still run our connectivity check; if it fails,
+    # disable the stale env var so LangChain doesn't try to connect.
+    if not settings.setup_tracing():
+        _os.environ["LANGCHAIN_TRACING_V2"] = "false"
+else:
+    settings.setup_tracing()
+del _os
 
 
 def build_rag_graph():
