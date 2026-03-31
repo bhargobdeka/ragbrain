@@ -84,12 +84,12 @@ Write the plain-English snapshot now."""
 
 def _load_recent_slack_content(lookback_hours: int = 24) -> str:
     """Pull the most recent Slack chunks from Qdrant and return as text."""
+    store = None
     try:
         from ragbrain.vectorstore.qdrant import QdrantStore
 
         store = QdrantStore()
         coll = store.collection_name()
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
         # Scroll all points, filter by source_type=slack
         offset = None
@@ -116,6 +116,9 @@ def _load_recent_slack_content(lookback_hours: int = 24) -> str:
     except Exception:
         logger.exception("Failed to load Slack content from Qdrant")
         return "(Could not load Slack news.)"
+    finally:
+        if store is not None:
+            store.close()
 
 
 def _load_architecture() -> str:

@@ -19,8 +19,21 @@ Commands:
 from __future__ import annotations
 
 import logging
+import os
+import warnings
 from datetime import datetime
 from pathlib import Path
+
+# Suppress HuggingFace tokenizers fork-after-parallelism warning (harmless).
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+# Suppress pydantic UserWarnings from deepagents' use of typing.NotRequired.
+# These are library internals — not actionable by RAGBrain users.
+warnings.filterwarnings(
+    "ignore",
+    message="typing.NotRequired is not a Python type",
+    category=UserWarning,
+)
 
 import typer
 from rich.console import Console
@@ -600,9 +613,12 @@ def run_automation(
 
         if docs:
             pipeline = IngestionPipeline()
-            for doc in docs:
-                pipeline.ingest_document(doc)
-            ingested_count = len(docs)
+            try:
+                for doc in docs:
+                    pipeline.ingest_document(doc)
+                ingested_count = len(docs)
+            finally:
+                pipeline.close()   # release Qdrant lock before step 2 opens it
             console.print(f"  [green]✓[/green] Ingested {ingested_count} Slack messages.")
         else:
             console.print("  [yellow]No new Slack messages found.[/yellow]")

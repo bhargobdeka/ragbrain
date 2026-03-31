@@ -151,8 +151,11 @@ def daily_automation_job() -> None:
         docs = extractor.extract_recent()
         if docs:
             pipeline = IngestionPipeline()
-            for doc in docs:
-                pipeline.ingest_document(doc)
+            try:
+                for doc in docs:
+                    pipeline.ingest_document(doc)
+            finally:
+                pipeline.close()   # release Qdrant lock before next step opens it
             logger.info("Ingested %d Slack news messages.", len(docs))
         else:
             logger.info("No new Slack messages found.")

@@ -24,6 +24,7 @@ NOTE: Changing use_code_encoder after ingestion requires deleting the
 
 from __future__ import annotations
 
+import atexit
 import warnings
 from typing import Any
 
@@ -32,6 +33,30 @@ from qdrant_client.http import models as qmodels
 
 from ragbrain.config import settings
 from ragbrain.models import BlockType, Chunk, RetrievalResult
+
+
+# ---------------------------------------------------------------------------
+# Global client registry — ensures clean shutdown with no __del__ tracebacks
+# ---------------------------------------------------------------------------
+
+_open_clients: list[QdrantClient] = []
+
+
+def _close_all_qdrant_clients() -> None:
+    """Close every tracked QdrantClient before Python tears down the interpreter.
+
+    Registered with atexit so it runs before __del__ handlers, preventing the
+    'ImportError: sys.meta_path is None' traceback from qdrant_client at exit.
+    """
+    for client in list(_open_clients):
+        try:
+            client.close()
+        except Exception:
+            pass
+    _open_clients.clear()
+
+
+atexit.register(_close_all_qdrant_clients)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +115,9 @@ def _open_local_qdrant(local_path: str) -> "QdrantClient":
     logger = logging.getLogger(__name__)
 
     try:
-        return QdrantClient(path=local_path)
+        client = QdrantClient(path=local_path)
+        _open_clients.append(client)
+        return client
     except RuntimeError as exc:
         if "already accessed" not in str(exc):
             raise
@@ -106,7 +133,9 @@ def _open_local_qdrant(local_path: str) -> "QdrantClient":
         else:
             logger.warning("Qdrant lock conflict with no lock file — retrying.")
 
-        return QdrantClient(path=local_path)
+        client = QdrantClient(path=local_path)
+        _open_clients.append(client)
+        return client
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +185,11 @@ class QdrantStore:
             # Avoid surfacing destructor-time shutdown noise to users.
             pass
         finally:
+            # Deregister so the atexit handler doesn't double-close.
+            try:
+                _open_clients.remove(client)
+            except ValueError:
+                pass
             self._client = None  # type: ignore[assignment]
 
     def __del__(self) -> None:
