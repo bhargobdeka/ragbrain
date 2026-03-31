@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     # Stored as raw string to avoid pydantic-settings json.loads() on list fields
     interests_str: str = "RAG systems,LLM agents,machine learning"
 
+    # ---- Vacation Automation Loop -----------------------------------
+    # Master switch — set RAGBRAIN_AUTOMATION_ENABLED=true in .env to enable.
+    # (env_prefix is RAGBRAIN_, so the env var is RAGBRAIN_AUTOMATION_ENABLED)
+    automation_enabled: bool = False
+    # Minimum eval pass rate required before committing an auto-implemented change.
+    # (env var: RAGBRAIN_EVAL_PASS_THRESHOLD)
+    eval_pass_threshold: float = 0.70
+
     # ---- Parsed list properties ------------------------------------
 
     @property

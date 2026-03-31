@@ -348,3 +348,51 @@ Today's date: {date_str}
             logger.exception("Failed to post upgrade plan to Slack")
 
     return report
+
+
+def get_upgrade_recommendations() -> list[dict]:
+    """Run the upgrade planner and return structured recommendations as dicts.
+
+    Each dict has keys matching UpgradeRecommendation fields:
+        component, suggestion, priority, effort, news_signal, rationale
+
+    Returns an empty list if planning fails.  Suitable for the scheduler's
+    daily_automation_job which needs structured data to create Proposals.
+    """
+    from deepagents import create_deep_agent
+    from langgraph.checkpoint.memory import MemorySaver
+
+    date_str = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
+
+    system_prompt = f"""\
+You are RAGBrain's architecture upgrade planner.
+Follow the same workflow as always — read architecture, read state, fetch news,
+search KB — then return a prioritised UpgradePlan.
+Today's date: {date_str}
+"""
+    checkpointer = MemorySaver()
+    agent = create_deep_agent(
+        model=settings.get_llm(),
+        tools=[read_architecture, read_architecture_state, fetch_slack_news, search_knowledge_base],
+        system_prompt=system_prompt,
+        checkpointer=checkpointer,
+        response_format=UpgradePlan,
+    )
+    thread_id = f"upgrade-recs-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+
+    try:
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": "Analyse and return a prioritised upgrade plan."}]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+    except Exception:
+        logger.exception("get_upgrade_recommendations: agent invocation failed")
+        return []
+
+    plan: UpgradePlan | None = result.get("structured_response")
+    if plan is None:
+        return []
+
+    _append_to_state_file(plan, date_str)
+
+    return [rec.model_dump() for rec in plan.recommendations]
