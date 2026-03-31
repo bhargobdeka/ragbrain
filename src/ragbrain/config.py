@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     # ---- Agentic RAG -----------------------------------------------
     max_retries: int = 2
     max_hallucination_retries: int = 2
+    query_timeout: int = 180   # seconds — hard ceiling per query (0 = disabled)
 
     # ---- LangSmith (optional observability) ------------------------
     # These use the standard LANGCHAIN_ env var names (no RAGBRAIN_ prefix).

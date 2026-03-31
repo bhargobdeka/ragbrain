@@ -21,6 +21,8 @@ class SourceType(StrEnum):
     PDF = "pdf"
     WEB = "web"
     RSS = "rss"
+    SLACK = "slack"
+    CODE = "code"
     UNKNOWN = "unknown"
 
 

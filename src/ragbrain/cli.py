@@ -78,8 +78,27 @@ def query(
 ) -> None:
     """Ask a question from your indexed knowledge base."""
     from ragbrain.agents.graph import query as rag_query
+    from ragbrain.config import settings as _s
+
+    def _run() -> dict:
+        return rag_query(question, user_id=user_id)
+
     with console.status("[cyan]Searching your knowledge base...[/cyan]"):
-        result = rag_query(question, user_id=user_id)
+        if _s.query_timeout > 0:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(_run)
+                try:
+                    result = future.result(timeout=_s.query_timeout)
+                except concurrent.futures.TimeoutError:
+                    console.print(
+                        f"[red]Query timed out after {_s.query_timeout}s.[/red]\n"
+                        "[dim]Try a more specific query, or raise "
+                        "RAGBRAIN_QUERY_TIMEOUT in your .env.[/dim]"
+                    )
+                    raise typer.Exit(1)
+        else:
+            result = _run()
 
     answer = result.get("answer", "")
     sources = result.get("sources", [])

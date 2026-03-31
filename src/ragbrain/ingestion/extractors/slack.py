@@ -133,7 +133,7 @@ class SlackExtractor:
                 break
 
         return Document(
-            source_type=SourceType.RSS,  # reuse RSS type for news-like content
+            source_type=SourceType.SLACK,
             source_url=f"slack://channel/{settings.slack_channel_id}/{ts}",
             title=title,
             author="Tuk-AI-OpenClaw",
