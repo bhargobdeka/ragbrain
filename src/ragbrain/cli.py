@@ -4,7 +4,7 @@ Commands:
   ragbrain ingest <path_or_url>       Index a document or URL
   ragbrain query  <question>          Ask a question from your knowledge base
   ragbrain digest                     Generate and print today's digest
-  ragbrain serve                      Start the Telegram bot (interactive)
+  ragbrain serve                      Start Telegram bot (add --scheduler for vacation mode)
   ragbrain schedule                   Start the automated scheduler
   ragbrain fetch-articles             Fetch and summarize articles now
   ragbrain ingest-slack               Ingest recent Slack news into knowledge base
@@ -178,21 +178,55 @@ def digest(
 # ---- serve -----------------------------------------------------------
 
 @app.command()
-def serve() -> None:
-    """Start the Telegram bot for interactive use."""
-    from ragbrain.config import settings
+def serve(
+    with_scheduler: bool = typer.Option(
+        False,
+        "--scheduler/--no-scheduler",
+        help="Also run the cron scheduler in the background (use for vacation mode)",
+    ),
+) -> None:
+    """Start the Telegram bot.
 
-    if not settings.telegram_bot_token:
+    For vacation mode — leave Mac running with both the bot AND the
+    daily scheduler active — use the --scheduler flag:
+
+      ragbrain serve --scheduler
+
+    Without --scheduler (default): just the interactive bot, no cron jobs.
+    """
+    from ragbrain.config import settings as _s
+
+    if not _s.telegram_bot_token:
         console.print(
-            "[red]Error:[/red] RAGBRAIN_TELEGRAM_BOT_TOKEN is not set.\n"
-            "Add it to your .env file. Get a bot token from @BotFather on Telegram."
+            "[red]Error:[/red] RAGBRAIN_TELEGRAM_BOT_TOKEN is not set.\n\n"
+            "Run [cyan]ragbrain telegram-setup[/cyan] first."
         )
         raise typer.Exit(1)
 
-    from ragbrain.delivery.telegram import run_bot
+    lines = [
+        f"Telegram bot:  [bold green]ON[/bold green]",
+        f"Scheduler:     [bold]{'ON (cron jobs active)' if with_scheduler else 'OFF'}[/bold]",
+        f"Automation:    [bold]{'ENABLED' if _s.automation_enabled else 'DISABLED (set RAGBRAIN_AUTOMATION_ENABLED=true)'}[/bold]",
+    ]
+    if with_scheduler and _s.automation_enabled:
+        lines += [
+            "",
+            f"Daily briefing + proposals: [cyan]{_s.morning_cron}[/cyan] UTC",
+            f"Architecture snapshot:      [cyan]{_s.evening_cron}[/cyan] UTC",
+        ]
 
-    console.print("[green]Starting RAGBrain Telegram bot...[/green]")
-    console.print("[dim]Press Ctrl+C to stop.[/dim]")
+    console.print(Panel("\n".join(lines), title="[bold]RAGBrain[/bold]", border_style="green"))
+    console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
+
+    if with_scheduler:
+        import threading
+        from ragbrain.scheduler import run_scheduler
+
+        t = threading.Thread(target=run_scheduler, daemon=True, name="ragbrain-scheduler")
+        t.start()
+        console.print("[dim]Scheduler running in background.[/dim]\n")
+
+    from ragbrain.delivery.telegram import run_bot
     run_bot()
 
 
