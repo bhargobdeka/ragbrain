@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import threading
+
 from ragbrain.agents.state import RAGState
 from ragbrain.retrieval.hybrid import HybridRetriever
 from ragbrain.retrieval.intent import detect_source_intent
 
 # Lazily initialised on first call so model loading and the Qdrant lock are
 # only acquired when a real query runs, not at import time.
+# Lock prevents a race condition where Deep Agents calls search_knowledge_base
+# concurrently from multiple threads, both seeing _retriever is None and both
+# trying to open a second QdrantClient (which fails with "already accessed").
 _retriever: HybridRetriever | None = None
+_retriever_lock = threading.Lock()
 
 
 def _get_retriever() -> HybridRetriever:
     global _retriever
     if _retriever is None:
-        _retriever = HybridRetriever()
+        with _retriever_lock:
+            if _retriever is None:   # double-checked locking
+                _retriever = HybridRetriever()
     return _retriever
 
 

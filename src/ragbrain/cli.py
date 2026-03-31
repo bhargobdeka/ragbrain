@@ -708,11 +708,23 @@ def run_automation(
     if not skip_planner:
         console.print("\n[cyan]Step 3/3 — Running UpgradePlanner (may take 1-2 min)...[/cyan]")
         try:
+            import concurrent.futures
             from ragbrain.pipelines.proposals import Proposal, get_store
             from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
 
+            _PLANNER_TIMEOUT = 180  # 3 minutes max — never block vacation runs
             with console.status("Planning upgrades with Deep Agents..."):
-                recs = get_upgrade_recommendations()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                    _fut = _ex.submit(get_upgrade_recommendations)
+                    try:
+                        recs = _fut.result(timeout=_PLANNER_TIMEOUT)
+                    except concurrent.futures.TimeoutError:
+                        console.print(
+                            f"  [yellow]UpgradePlanner timed out after {_PLANNER_TIMEOUT}s "
+                            f"— skipping proposals for today.[/yellow]\n"
+                            "  [dim](Briefing was already sent successfully.)[/dim]"
+                        )
+                        recs = []
 
             if not recs:
                 console.print("  [yellow]No recommendations returned.[/yellow]")

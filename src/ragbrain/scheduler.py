@@ -183,10 +183,19 @@ def daily_automation_job() -> None:
 
     # ---- Step 3 + 4: Upgrade proposals --------------------------------
     try:
+        import concurrent.futures as _cf
         from ragbrain.pipelines.proposals import Proposal, get_store
         from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
 
-        recs = get_upgrade_recommendations()
+        _PLANNER_TIMEOUT = 180  # 3 minutes max — never block the daily job
+        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+            _fut = _ex.submit(get_upgrade_recommendations)
+            try:
+                recs = _fut.result(timeout=_PLANNER_TIMEOUT)
+            except _cf.TimeoutError:
+                logger.warning("UpgradePlanner timed out after %ds — skipping proposals.", _PLANNER_TIMEOUT)
+                recs = []
+
         if not recs:
             logger.info("UpgradePlanner returned no recommendations.")
             return
