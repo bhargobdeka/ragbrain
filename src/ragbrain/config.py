@@ -172,12 +172,16 @@ class Settings(BaseSettings):
                 model=self.llm_model,
                 temperature=self.llm_temperature,
                 api_key=self.anthropic_api_key,  # type: ignore[arg-type]
+                default_request_timeout=60,
+                max_retries=1,
             )
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=self.llm_model,
             temperature=self.llm_temperature,
             api_key=self.openai_api_key,  # type: ignore[arg-type]
+            timeout=60,
+            max_retries=1,
         )
 
     def get_fast_llm(self):
@@ -188,12 +192,16 @@ class Settings(BaseSettings):
                 model=self.llm_fast_model,
                 temperature=self.llm_temperature,
                 api_key=self.anthropic_api_key,  # type: ignore[arg-type]
+                default_request_timeout=30,
+                max_retries=1,
             )
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=self.llm_fast_model,
             temperature=self.llm_temperature,
             api_key=self.openai_api_key,  # type: ignore[arg-type]
+            timeout=30,
+            max_retries=1,
         )
 
 
