@@ -10,6 +10,7 @@ Commands:
   ragbrain ingest-slack               Ingest recent Slack news into knowledge base
   ragbrain review-architecture        Run the self-improvement architecture review
   ragbrain plan-upgrades              Run the Deep Agents upgrade planner
+  ragbrain run-automation             Run the full daily automation loop right now
   ragbrain eval                       Run quality evaluation suites
   ragbrain tracing                    Show LangSmith tracing status
 """
@@ -556,6 +557,147 @@ def plan_upgrades(
 
     if post_slack:
         console.print("[green]Plan posted to Slack.[/green]")
+
+
+# ---- run-automation --------------------------------------------------
+
+@app.command(name="run-automation")
+def run_automation(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print output but don't send to Telegram"),
+    skip_planner: bool = typer.Option(False, "--skip-planner", help="Skip upgrade planner (faster, briefing only)"),
+) -> None:
+    """Run the full daily automation loop right now.
+
+    This is the same job the scheduler runs at 8 AM. Use it to:
+    - Test the pipeline before vacation
+    - Trigger manually when you want a fresh briefing + proposals
+    - Debug issues without waiting for the cron to fire
+
+    Steps:
+      1. Ingest recent Slack news into knowledge base
+      2. Generate daily briefing (what Tuk covered + RAGBrain relevance)
+      3. Run UpgradePlanner → create Proposals → send to Telegram with buttons
+    """
+    from ragbrain.config import settings as _s
+
+    if not _s.automation_enabled and not dry_run:
+        console.print(
+            "[yellow]RAGBRAIN_AUTOMATION_ENABLED is false in your .env.[/yellow]\n"
+            "Running anyway (you triggered this manually).\n"
+        )
+
+    # ---- Step 1: Ingest Slack news -----------------------------------
+    console.print("[cyan]Step 1/3 — Ingesting Slack news...[/cyan]")
+    ingested_count = 0
+    try:
+        from ragbrain.ingestion.extractors.slack import SlackExtractor
+        from ragbrain.ingestion.pipeline import IngestionPipeline
+
+        extractor = SlackExtractor(fetch_urls=False)
+        with console.status("Fetching from Slack..."):
+            docs = extractor.extract_recent()
+
+        if docs:
+            pipeline = IngestionPipeline()
+            for doc in docs:
+                pipeline.ingest_document(doc)
+            ingested_count = len(docs)
+            console.print(f"  [green]✓[/green] Ingested {ingested_count} Slack messages.")
+        else:
+            console.print("  [yellow]No new Slack messages found.[/yellow]")
+    except Exception as e:
+        console.print(f"  [red]Slack ingestion failed:[/red] {e}")
+
+    # ---- Step 2: Daily briefing --------------------------------------
+    console.print("\n[cyan]Step 2/3 — Generating daily briefing...[/cyan]")
+    briefing = ""
+    try:
+        from ragbrain.pipelines.daily_briefing import generate_daily_briefing
+
+        with console.status("Generating briefing with LLM..."):
+            briefing = generate_daily_briefing()
+
+        # Print a plain-text preview (strip HTML tags for CLI)
+        import re
+        plain = re.sub(r"<[^>]+>", "", briefing)
+        console.print(Panel(plain[:1200] + ("..." if len(plain) > 1200 else ""),
+                            title="[bold]Daily Briefing Preview[/bold]",
+                            border_style="blue"))
+
+        if not dry_run and _s.telegram_bot_token and _s.telegram_chat_id:
+            import asyncio
+            from ragbrain.scheduler import _send_telegram
+            asyncio.run(_send_telegram(briefing))
+            console.print("  [green]✓[/green] Briefing sent to Telegram.")
+        elif dry_run:
+            console.print("  [dim]Dry-run: Telegram send skipped.[/dim]")
+        else:
+            console.print(
+                "  [yellow]Telegram not configured — skipping send.[/yellow]\n"
+                "  Set RAGBRAIN_TELEGRAM_BOT_TOKEN and RAGBRAIN_TELEGRAM_CHAT_ID in .env"
+            )
+    except Exception as e:
+        console.print(f"  [red]Briefing failed:[/red] {e}")
+
+    # ---- Step 3: Upgrade proposals -----------------------------------
+    if not skip_planner:
+        console.print("\n[cyan]Step 3/3 — Running UpgradePlanner (may take 1-2 min)...[/cyan]")
+        try:
+            from ragbrain.pipelines.proposals import Proposal, get_store
+            from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
+
+            with console.status("Planning upgrades with Deep Agents..."):
+                recs = get_upgrade_recommendations()
+
+            if not recs:
+                console.print("  [yellow]No recommendations returned.[/yellow]")
+            else:
+                store = get_store()
+                sent = 0
+                for rec in recs[:3]:
+                    suggestion = rec.get("suggestion", "")
+                    proposal = Proposal(
+                        title=suggestion[:80] if suggestion else "Architecture Upgrade",
+                        description=rec.get("rationale", ""),
+                        implementation_plan=suggestion,
+                        component=rec.get("component", ""),
+                        priority=rec.get("priority", "MEDIUM"),
+                        news_signal=rec.get("news_signal", ""),
+                    )
+                    store.add(proposal)
+                    console.print(
+                        f"  [green]✓[/green] Proposal #{proposal.id}: [{proposal.priority}] {proposal.title[:60]}"
+                    )
+
+                    if not dry_run and _s.telegram_bot_token and _s.telegram_chat_id:
+                        import asyncio
+                        from ragbrain.scheduler import _send_proposal_telegram
+                        asyncio.run(_send_proposal_telegram(proposal))
+                        sent += 1
+
+                if sent:
+                    console.print(f"\n  [green]✓[/green] {sent} proposal(s) sent to Telegram with Approve/Skip/Explain buttons.")
+                elif dry_run:
+                    console.print("  [dim]Dry-run: Telegram send skipped.[/dim]")
+                else:
+                    console.print(
+                        "  [yellow]Proposals saved locally. Set Telegram credentials to send buttons.[/yellow]"
+                    )
+        except Exception as e:
+            console.print(f"  [red]Upgrade planner failed:[/red] {e}")
+    else:
+        console.print("\n[dim]Step 3/3 — Skipped (--skip-planner).[/dim]")
+
+    # ---- Summary -------------------------------------------------------
+    console.print()
+    console.print(Panel(
+        f"Slack messages ingested: [bold]{ingested_count}[/bold]\n"
+        f"Briefing generated:      [bold]{'yes' if briefing else 'no'}[/bold]\n"
+        f"Proposals stored:        see [cyan]~/.ragbrain/proposals.json[/cyan]\n\n"
+        f"[dim]Run [cyan]ragbrain serve[/cyan] to start the Telegram bot and process approvals.[/dim]",
+        title="[bold]Automation Run Complete[/bold]",
+        border_style="green",
+    ))
 
 
 # ---- tracing --------------------------------------------------------

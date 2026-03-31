@@ -81,6 +81,11 @@ async def send_proposal(bot, chat_id: int, proposal: Proposal) -> None:
 # ---- Command handlers ------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Log the chat ID so it's easy to find for RAGBRAIN_TELEGRAM_CHAT_ID
+    chat_id = update.effective_chat.id
+    logger.info("Chat ID hint — add to .env: RAGBRAIN_TELEGRAM_CHAT_ID=%s", chat_id)
+    print(f"\n  Chat ID hint: RAGBRAIN_TELEGRAM_CHAT_ID={chat_id}\n")
+
     await update.message.reply_text(
         "👋 <b>Welcome to RAGBrain!</b>\n\n"
         "Your personal document intelligence assistant.\n\n"
