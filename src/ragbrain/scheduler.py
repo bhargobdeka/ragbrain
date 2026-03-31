@@ -127,6 +127,45 @@ def evening_lesson_job() -> None:
         logger.exception("Evening lesson job failed")
 
 
+def _planner_subprocess_worker(queue) -> None:
+    """Subprocess worker: runs the planner and sends results via Queue."""
+    try:
+        from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
+        queue.put(get_upgrade_recommendations())
+    except Exception as exc:
+        queue.put(exc)
+
+
+def _run_planner_subprocess(timeout: int) -> list:
+    """Run upgrade planner in a subprocess with a hard kill timeout.
+
+    Uses multiprocessing.Process so a hung planner is SIGKILL'd after
+    `timeout` seconds — threads cannot be force-killed in Python.
+    """
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    q: multiprocessing.Queue = ctx.Queue()
+    p = ctx.Process(target=_planner_subprocess_worker, args=(q,), daemon=True)
+    p.start()
+    p.join(timeout=timeout)
+
+    if p.is_alive():
+        p.kill()
+        p.join(timeout=5)
+        logger.warning("UpgradePlanner killed after %ds timeout — skipping proposals.", timeout)
+        return []
+
+    if not q.empty():
+        result = q.get_nowait()
+        if isinstance(result, Exception):
+            logger.warning("UpgradePlanner error: %s", result)
+            return []
+        return result if isinstance(result, list) else []
+
+    return []
+
+
 def daily_automation_job() -> None:
     """Daily automation loop — runs at 8 AM UTC when automation is enabled.
 
@@ -183,20 +222,10 @@ def daily_automation_job() -> None:
 
     # ---- Step 3 + 4: Upgrade proposals --------------------------------
     try:
-        import concurrent.futures as _cf
         from ragbrain.pipelines.proposals import Proposal, get_store
-        from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
 
-        _PLANNER_TIMEOUT = 180  # 3 minutes max — never block the daily job
-        _ex = _cf.ThreadPoolExecutor(max_workers=1)
-        _fut = _ex.submit(get_upgrade_recommendations)
-        try:
-            recs = _fut.result(timeout=_PLANNER_TIMEOUT)
-        except _cf.TimeoutError:
-            logger.warning("UpgradePlanner timed out after %ds — skipping proposals.", _PLANNER_TIMEOUT)
-            recs = []
-        finally:
-            _ex.shutdown(wait=False)  # don't block — let thread die on its own
+        _PLANNER_TIMEOUT = 180  # 3 minutes hard kill via subprocess
+        recs = _run_planner_subprocess(_PLANNER_TIMEOUT)
 
         if not recs:
             logger.info("UpgradePlanner returned no recommendations.")

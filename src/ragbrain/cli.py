@@ -608,6 +608,53 @@ def plan_upgrades(
         console.print("[green]Plan posted to Slack.[/green]")
 
 
+# ---- helpers for run-automation --------------------------------------
+
+def _planner_worker(queue) -> None:
+    """Worker executed in a subprocess — results put into a multiprocessing Queue."""
+    try:
+        from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
+        recs = get_upgrade_recommendations()
+        queue.put(recs)
+    except Exception as exc:
+        queue.put(exc)
+
+
+def _run_planner_with_timeout(timeout: int) -> list:
+    """Run get_upgrade_recommendations() in a subprocess with a hard kill timeout.
+
+    Uses multiprocessing.Process (not threading) so the process can be
+    SIGKILL'd if it hangs — threads cannot be force-killed in Python.
+    Returns a list of recommendation dicts, or [] on timeout / error.
+    """
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")   # safe on macOS with fork issues
+    q: multiprocessing.Queue = ctx.Queue()
+    p = ctx.Process(target=_planner_worker, args=(q,), daemon=True)
+    p.start()
+    p.join(timeout=timeout)
+
+    if p.is_alive():
+        p.kill()
+        p.join(timeout=5)
+        console.print(
+            f"  [yellow]UpgradePlanner timed out after {timeout}s "
+            f"— skipping proposals for today.[/yellow]\n"
+            "  [dim](Briefing was already sent successfully.)[/dim]"
+        )
+        return []
+
+    if not q.empty():
+        result = q.get_nowait()
+        if isinstance(result, Exception):
+            console.print(f"  [yellow]UpgradePlanner error:[/yellow] {result}")
+            return []
+        return result if isinstance(result, list) else []
+
+    return []
+
+
 # ---- run-automation --------------------------------------------------
 
 @app.command(name="run-automation")
@@ -708,27 +755,11 @@ def run_automation(
     if not skip_planner:
         console.print("\n[cyan]Step 3/3 — Running UpgradePlanner (may take 1-2 min)...[/cyan]")
         try:
-            import concurrent.futures
             from ragbrain.pipelines.proposals import Proposal, get_store
-            from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
 
-            _PLANNER_TIMEOUT = 180  # 3 minutes max — never block vacation runs
+            _PLANNER_TIMEOUT = 180  # 3 minutes hard kill
             with console.status("Planning upgrades with Deep Agents..."):
-                _ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                _fut = _ex.submit(get_upgrade_recommendations)
-                try:
-                    recs = _fut.result(timeout=_PLANNER_TIMEOUT)
-                except concurrent.futures.TimeoutError:
-                    recs = []
-                    console.print(
-                        f"  [yellow]UpgradePlanner timed out after {_PLANNER_TIMEOUT}s "
-                        f"— skipping proposals for today.[/yellow]\n"
-                        "  [dim](Briefing was already sent successfully.)[/dim]"
-                    )
-                finally:
-                    # wait=False — let the background thread die on its own;
-                    # don't block the main process waiting for it to finish.
-                    _ex.shutdown(wait=False)
+                recs = _run_planner_with_timeout(_PLANNER_TIMEOUT)
 
             if not recs:
                 console.print("  [yellow]No recommendations returned.[/yellow]")

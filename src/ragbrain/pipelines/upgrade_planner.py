@@ -301,7 +301,9 @@ Today's date: {date_str}
             read_architecture,
             read_architecture_state,
             fetch_slack_news,
-            search_knowledge_base,
+            # search_knowledge_base intentionally excluded: it opens Qdrant which
+            # is already held by the main process, causing "already accessed" hangs.
+            # The planner gets sufficient signal from Slack news + architecture docs.
         ],
         system_prompt=system_prompt,
         checkpointer=checkpointer,
@@ -316,8 +318,9 @@ Today's date: {date_str}
                 "role": "user",
                 "content": (
                     "Please analyse recent AI news and compare it against RAGBrain's "
-                    "architecture. Use all four tools to gather information, then "
-                    "produce a prioritised upgrade plan."
+                    "architecture. Use read_architecture, read_architecture_state, and "
+                    "fetch_slack_news to gather information, then produce a prioritised "
+                    "upgrade plan."
                 ),
             }]
         },
@@ -366,14 +369,16 @@ def get_upgrade_recommendations() -> list[dict]:
 
     system_prompt = f"""\
 You are RAGBrain's architecture upgrade planner.
-Follow the same workflow as always — read architecture, read state, fetch news,
-search KB — then return a prioritised UpgradePlan.
+Use read_architecture, read_architecture_state, and fetch_slack_news to gather
+information, then return a prioritised UpgradePlan.
 Today's date: {date_str}
 """
     checkpointer = MemorySaver()
     agent = create_deep_agent(
         model=settings.get_llm(),
-        tools=[read_architecture, read_architecture_state, fetch_slack_news, search_knowledge_base],
+        # search_knowledge_base excluded — it opens Qdrant which is already
+        # held by the main process, causing "already accessed" deadlocks.
+        tools=[read_architecture, read_architecture_state, fetch_slack_news],
         system_prompt=system_prompt,
         checkpointer=checkpointer,
         response_format=UpgradePlan,
