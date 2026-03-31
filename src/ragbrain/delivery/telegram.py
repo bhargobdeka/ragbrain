@@ -237,60 +237,79 @@ async def handle_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def handle_callback_query(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle inline button taps from proposal messages."""
+    """Handle inline button taps from proposal messages.
+
+    Telegram callback queries expire after 60 seconds.  If the user taps a
+    button on an older message, query.answer() raises BadRequest.  We catch
+    that and continue processing the action anyway — the important part is
+    updating ProposalStore and running AutoImplementer, not the spinner ack.
+    """
     query = update.callback_query
-    await query.answer()   # stop the loading spinner
+
+    # Acknowledge the button tap (stops the spinner on the user's phone).
+    # Swallow BadRequest/NetworkError so a stale query doesn't abort the action.
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.debug("query.answer() failed (query may be expired): %s", e)
 
     data: str = query.data or ""
     if ":" not in data:
         return
 
     action, proposal_id = data.split(":", 1)
+    chat_id = query.message.chat_id if query.message else settings.telegram_chat_id
     store = get_store()
     proposal = store.get(proposal_id)
 
     if proposal is None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
+            chat_id=chat_id,
             text=f"⚠️ Proposal <code>{proposal_id}</code> not found.",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    # Remove buttons immediately to prevent double-taps
-    await query.edit_message_reply_markup(reply_markup=None)
+    # Remove buttons to prevent double-taps (best-effort — may fail on old messages).
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     if action == "skip":
         store.skip(proposal_id)
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
+            chat_id=chat_id,
             text=f"⏭ Skipped: <i>{proposal.title}</i>",
             parse_mode=ParseMode.HTML,
         )
 
     elif action == "explain":
+        from ragbrain.pipelines.proposals import Proposal as _P
+        p = proposal
         explanation = (
-            f"<b>{proposal.title}</b>\n\n"
-            f"<i>Description:</i>\n{proposal.description}\n\n"
-            f"<i>Implementation plan:</i>\n{proposal.implementation_plan}\n\n"
-            f"<i>News signal:</i>\n{proposal.news_signal}"
+            f"<b>{p.title}</b>\n\n"
+            f"<i>Description:</i>\n{p.description}\n\n"
+            f"<i>Implementation plan:</i>\n{p.implementation_plan}\n\n"
+            f"<i>News signal:</i>\n{p.news_signal}"
         )
         for chunk in _split_message(explanation):
             await context.bot.send_message(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 text=chunk,
                 parse_mode=ParseMode.HTML,
             )
         # Resend with buttons so user can still approve
-        await send_proposal(
-            context.bot, query.message.chat_id, proposal
-        )
+        await send_proposal(context.bot, chat_id, proposal)
 
     elif action == "approve":
         store.approve(proposal_id)
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
+            chat_id=chat_id,
             text=(
                 f"✅ Approved: <i>{proposal.title}</i>\n\n"
                 "⏳ Starting auto-implementation on your Mac…"
@@ -300,7 +319,6 @@ async def handle_callback_query(
 
         # Run AutoImplementer in a thread to avoid blocking the bot event loop
         loop = asyncio.get_event_loop()
-        chat_id = query.message.chat_id
         bot = context.bot
 
         async def _run_impl() -> None:
@@ -383,6 +401,29 @@ def _split_message(text: str, limit: int = 4000) -> list[str]:
     return parts
 
 
+# ---- Global error handler -------------------------------------------
+
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler — logs cleanly instead of printing full tracebacks.
+
+    Suppresses:
+      - NetworkError / ConnectError: transient network blip, bot auto-retries
+      - BadRequest 'Query is too old': user tapped a button after 60s timeout
+    These are expected in long-running vacation mode and should not alarm.
+    """
+    from telegram.error import BadRequest, NetworkError
+
+    err = context.error
+    if isinstance(err, NetworkError):
+        logger.debug("Telegram network blip (auto-retry): %s", err)
+        return
+    if isinstance(err, BadRequest) and "too old" in str(err).lower():
+        logger.debug("Stale callback query ignored: %s", err)
+        return
+    # Log anything else as a warning (not a full traceback)
+    logger.warning("Unhandled Telegram error: %s", err)
+
+
 # ---- Bot entry point -------------------------------------------------
 
 def run_bot() -> None:
@@ -408,6 +449,9 @@ def run_bot() -> None:
 
     # Inline button callback handler
     app.add_handler(CallbackQueryHandler(handle_callback_query))
+
+    # Global error handler — suppresses noisy network/stale-query tracebacks
+    app.add_error_handler(handle_error)
 
     # Plain text → RAG query (must be last to not catch commands)
     app.add_handler(
