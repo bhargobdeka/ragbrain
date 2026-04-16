@@ -87,7 +87,7 @@ Rules:
    - "target_file": relative path from repo root (e.g. "tests/eval/new_suite.yaml")
    - "content": the COMPLETE file content (not a diff, the entire new file)
 2. If the proposal cannot be safely implemented in the allowed scope, output:
-   {"target_file": null, "content": "REASON: <why it cannot be auto-implemented>"}
+   {{"target_file": null, "content": "REASON: <why it cannot be auto-implemented>"}}
 3. For tests/eval/ files: generate a complete YAML test suite with at least 2 test cases.
 4. For retrieval/intent.py: only modify keyword sets, do not change function logic.
 5. For config.py: only change Field default= values, do not restructure code.

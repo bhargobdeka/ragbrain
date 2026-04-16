@@ -39,6 +39,8 @@ from telegram.ext import (
     filters,
 )
 
+from pathlib import Path
+
 from ragbrain.agents.graph import query as rag_query
 from ragbrain.config import settings
 from ragbrain.delivery.formatter import DigestFormatter
@@ -48,7 +50,48 @@ from ragbrain.pipelines.articles import ArticlesPipeline
 from ragbrain.pipelines.books import BooksPipeline
 from ragbrain.pipelines.proposals import Proposal, get_store
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_NEWS_DIR = _REPO_ROOT / "news"
+_DRAFTS_DIR = _REPO_ROOT / "_planning" / "drafts"
+_BRIEFING_SIGNATURES = ("Daily AI Briefing", "───", "Tuk's Daily")
+
 logger = logging.getLogger(__name__)
+
+
+async def notify_telegram_html(message: str) -> None:
+    """Send an HTML message to the configured Telegram chat (scheduler / automation).
+
+    Splits on 4000-char Telegram limits. No-op if bot token or chat id is missing.
+    """
+    token = settings.telegram_bot_token
+    chat_id = settings.telegram_chat_id
+    if not token or not chat_id:
+        return
+
+    from telegram import Bot
+    from telegram.constants import ParseMode
+
+    limit = 4000
+    text = message
+    bot = Bot(token=token)
+    async with bot:
+        while len(text) > limit:
+            split_at = text.rfind("\n", 0, limit)
+            if split_at == -1:
+                split_at = limit
+            await bot.send_message(
+                chat_id=chat_id, text=text[:split_at], parse_mode=ParseMode.HTML
+            )
+            text = text[split_at:].lstrip("\n")
+        if text:
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+
+
+def notify_telegram_html_sync(message: str) -> None:
+    """Sync wrapper for :func:`notify_telegram_html` (for non-async call sites)."""
+    asyncio.run(notify_telegram_html(message))
+
+
 formatter = DigestFormatter()
 
 
@@ -113,7 +156,10 @@ async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         articles_pipeline = ArticlesPipeline()
         books_pipeline = BooksPipeline()
 
-        articles = articles_pipeline.run()
+        try:
+            articles = articles_pipeline.run()
+        finally:
+            articles_pipeline.close()
         book_lesson = books_pipeline.get_next_lesson()
 
         digest = Digest(
@@ -222,10 +268,84 @@ async def cmd_architecture(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+# ---- Briefing detection helpers ------------------------------------------
+
+def _strip_preamble(text: str) -> str:
+    """Remove Tuk's opener sentence before the first ─── separator.
+
+    The raw forwarded message starts with a conversational line like
+    "Good — solid signal from all three searches. Here's today's briefing:"
+    followed by a blank line and the first ─── divider.  We drop everything
+    before (and not including) the first ─── so the saved file starts cleanly.
+    """
+    idx = text.find("───")
+    return text[idx:].strip() if idx != -1 else text.strip()
+
+
+def _is_forwarded_briefing(message) -> bool:
+    """Return True if the message is a forwarded OpenClaw/Tuk briefing."""
+    is_forwarded = bool(
+        getattr(message, "forward_date", None)
+        or getattr(message, "forward_origin", None)
+    )
+    if not is_forwarded:
+        return False
+    text = message.text or ""
+    return any(sig in text for sig in _BRIEFING_SIGNATURES)
+
+
+async def _save_briefing(update: Update) -> None:
+    """Save a forwarded briefing to news/YYYY-MM-DD.md and confirm."""
+    message = update.message
+    text = _strip_preamble(message.text or "")
+
+    # Use the original message date (forward_date) so the filename matches
+    # the day the briefing was actually published, not when it was forwarded.
+    origin_date = getattr(message, "forward_date", None) or message.date
+    date_str = origin_date.strftime("%Y-%m-%d")
+
+    _NEWS_DIR.mkdir(parents=True, exist_ok=True)
+    news_dest = _NEWS_DIR / f"{date_str}.md"
+    news_dest.write_text(text, encoding="utf-8")
+    logger.info("Saved briefing to %s", news_dest)
+
+    # Generate X thread draft (async-safe: single LLM call, fast model)
+    draft_msg = ""
+    try:
+        from ragbrain.pipelines.x_thread import format_draft_md, generate_x_thread
+
+        tweets = generate_x_thread(text)
+        _DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+        draft_dest = _DRAFTS_DIR / f"{date_str}-x-draft.md"
+        draft_dest.write_text(format_draft_md(tweets, date_str), encoding="utf-8")
+        logger.info("X thread draft saved to %s (%d tweets)", draft_dest, len(tweets))
+        draft_msg = (
+            f"\n\n🐦 X thread draft → <code>_planning/drafts/{date_str}-x-draft.md</code>"
+            f" ({len(tweets)} tweets)"
+        )
+    except Exception:
+        logger.exception("X thread draft generation failed (news still saved)")
+        draft_msg = "\n\n⚠️ X draft generation failed — check logs."
+
+    await update.message.reply_text(
+        f"📰 Briefing saved to <code>news/{date_str}.md</code>{draft_msg}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 # ---- Message handler (plain text → RAG query) ----------------------------
 
 async def handle_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route plain text messages to the RAG query pipeline."""
+    """Route plain text messages to the RAG query pipeline.
+
+    Forwarded OpenClaw/Tuk briefings are intercepted first and saved to
+    news/YYYY-MM-DD.md without going through the RAG pipeline.
+    """
+    if not update.message:
+        return
+    if _is_forwarded_briefing(update.message):
+        await _save_briefing(update)
+        return
     text = update.message.text or ""
     if not text.strip():
         return

@@ -6,6 +6,7 @@ secrets/
 
 # ---- Planning docs (not for public repo) -------------------
 _planning/
+_planning/drafts/
 conversation-RAG-plan.md
 
 # ---- Python ---------------------------------------------------

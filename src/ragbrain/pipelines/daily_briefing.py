@@ -3,9 +3,9 @@
 Two public functions:
 
     generate_daily_briefing()
-        Reads today's Slack news from Qdrant, explains what Tuk covered and
-        how each item relates to RAGBrain's current architecture.  Formatted
-        for mobile Telegram reading (short paragraphs, clear headings).
+        Reads today's RSS/web-indexed news from Qdrant and explains how each
+        item relates to RAGBrain's current architecture.  Formatted for
+        mobile Telegram reading (short paragraphs, clear headings).
 
     architecture_snapshot()
         Reads ARCHITECTURE.md and generates a plain-English explanation of
@@ -30,8 +30,9 @@ _ARCHITECTURE_PATH = Path(__file__).resolve().parents[3] / "ARCHITECTURE.md"
 # ---- Prompts -------------------------------------------------------------
 
 _BRIEFING_SYSTEM = """You are RAGBrain's daily learning assistant.
-Your job: take today's AI news (from Tuk's Slack briefing) and write a
-concise, educational summary for the developer who built RAGBrain.
+Your job: take today's AI news (from the user's RSS feeds, indexed into the
+knowledge base) and write a concise, educational summary for the developer
+who built RAGBrain.
 
 Format your response for mobile Telegram reading:
 - Short paragraphs (max 3 sentences each)
@@ -40,13 +41,13 @@ Format your response for mobile Telegram reading:
 - Max total length: 800 words
 
 Structure:
-1. <b>Today's AI News (from Tuk)</b> — 3-5 bullet points of what was covered
+1. <b>Today's AI News</b> — 3-5 bullet points of what was covered
 2. <b>Relevance to RAGBrain</b> — for each major news item, say in 1-2 sentences
    whether RAGBrain already handles it, partially handles it, or doesn't yet
 3. <b>Key Takeaway</b> — one sentence: the most important thing to know today
 """
 
-_BRIEFING_HUMAN = """Today's Slack news:
+_BRIEFING_HUMAN = """Today's AI news (from indexed articles):
 
 {news_content}
 
@@ -79,11 +80,64 @@ _SNAPSHOT_HUMAN = """Here is the full technical architecture document:
 
 Write the plain-English snapshot now."""
 
+_LINKEDIN_POST_SYSTEM = """You write high-engagement LinkedIn posts for AI builders.
+
+Write one short post based on today's AI news and RAGBrain architecture updates.
+
+Rules:
+- Plain text only (no markdown, no HTML)
+- Hook in first 2 lines (contrarian or number-driven)
+- 3-5 short paragraphs
+- 150-300 words
+- Mention the builder angle: "I'm building RAGBrain, an open-source agentic RAG framework"
+- Include one concrete implementation insight from today's changes
+- No external links
+- End with one engagement question
+"""
+
+_LINKEDIN_POST_HUMAN = """Today's AI news:
+{news_content}
+
+RAGBrain architecture summary:
+{architecture_summary}
+
+Write one LinkedIn post draft now."""
+
+_TWITTER_THREAD_SYSTEM = """You write concise X/Twitter threads for technical AI updates.
+
+Write exactly 3 tweets in a thread.
+
+Rules:
+- Plain text only
+- Format exactly:
+  Tweet 1: ...
+  Tweet 2: ...
+  Tweet 3: ...
+- Each tweet <= 280 chars
+- Tweet 1 must have a strong hook in first 8 words
+- Include at least one specific metric or concrete detail in Tweet 1
+- Mention practical relevance to RAGBrain (agentic RAG / retrieval / security / evals)
+- End Tweet 3 with a question or CTA
+"""
+
+_TWITTER_THREAD_HUMAN = """Today's AI news:
+{news_content}
+
+RAGBrain architecture summary:
+{architecture_summary}
+
+Write the 3-tweet thread now."""
+
 
 # ---- Helpers -------------------------------------------------------------
 
-def _load_recent_slack_content(lookback_hours: int = 24) -> str:
-    """Pull the most recent Slack chunks from Qdrant and return as text."""
+# Chunks from RSS + web article ingestion (see ArticlesPipeline.run(also_ingest=True)).
+# Legacy Slack chunks are still shown if present so older indexes remain useful.
+_NEWS_SOURCE_TYPES = frozenset({"rss", "web", "slack"})
+
+
+def _load_recent_news_from_kb(lookback_hours: int = 24) -> str:
+    """Pull recent RSS/web (and legacy Slack) chunks from Qdrant and return as text."""
     store = None
     try:
         from ragbrain.vectorstore.qdrant import QdrantStore
@@ -91,9 +145,8 @@ def _load_recent_slack_content(lookback_hours: int = 24) -> str:
         store = QdrantStore()
         coll = store.collection_name()
 
-        # Scroll all points, filter by source_type=slack
         offset = None
-        slack_chunks: list[str] = []
+        news_chunks: list[str] = []
         while True:
             results, offset = store._client.scroll(
                 collection_name=coll,
@@ -104,18 +157,21 @@ def _load_recent_slack_content(lookback_hours: int = 24) -> str:
             )
             for pt in results:
                 p = pt.payload or {}
-                if p.get("source_type") == "slack":
-                    slack_chunks.append(p.get("content", ""))
+                if p.get("source_type") in _NEWS_SOURCE_TYPES:
+                    news_chunks.append(p.get("content", ""))
             if offset is None:
                 break
 
-        if not slack_chunks:
-            return "(No Slack news ingested yet — run `ragbrain ingest-slack` first.)"
+        if not news_chunks:
+            return (
+                "(No AI news in the knowledge base yet — set RAGBRAIN_RSS_FEEDS_STR and run "
+                "`ragbrain fetch-articles` or enable daily automation so articles are indexed.)"
+            )
 
-        return "\n\n---\n\n".join(slack_chunks[:20])  # cap at 20 chunks
+        return "\n\n---\n\n".join(news_chunks[:20])  # cap at 20 chunks
     except Exception:
-        logger.exception("Failed to load Slack content from Qdrant")
-        return "(Could not load Slack news.)"
+        logger.exception("Failed to load news content from Qdrant")
+        return "(Could not load indexed news.)"
     finally:
         if store is not None:
             store.close()
@@ -138,17 +194,30 @@ def _load_architecture_state() -> str:
 
 # ---- Public API ----------------------------------------------------------
 
-def generate_daily_briefing(lookback_hours: int = 24) -> str:
-    """Generate a mobile-friendly Telegram briefing of today's Slack news.
+def get_daily_inputs(lookback_hours: int = 24) -> tuple[str, str]:
+    """Load shared daily inputs once (for briefing + social drafts).
+
+    Returns:
+        tuple(news_content, architecture_summary)
+    """
+    news_content = _load_recent_news_from_kb(lookback_hours)
+    arch = _load_architecture()
+    arch_summary = arch[:2000]
+    return news_content, arch_summary
+
+def generate_daily_briefing(
+    lookback_hours: int = 24,
+    news_content: str | None = None,
+    architecture_summary: str | None = None,
+) -> str:
+    """Generate a mobile-friendly Telegram briefing from today's indexed AI news.
 
     Returns an HTML-formatted string ready to send via Telegram.
     """
     llm = settings.get_fast_llm()
 
-    news_content = _load_recent_slack_content(lookback_hours)
-    arch = _load_architecture()
-    # Only pass the first 2000 chars of architecture to keep prompt short
-    arch_summary = arch[:2000]
+    if news_content is None or architecture_summary is None:
+        news_content, architecture_summary = get_daily_inputs(lookback_hours)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", _BRIEFING_SYSTEM),
@@ -159,7 +228,7 @@ def generate_daily_briefing(lookback_hours: int = 24) -> str:
     try:
         response = chain.invoke({
             "news_content": news_content,
-            "architecture_summary": arch_summary,
+            "architecture_summary": architecture_summary,
         })
         content = response.content if hasattr(response, "content") else str(response)
         date_str = datetime.now(timezone.utc).strftime("%A, %B %d")
@@ -213,3 +282,55 @@ def architecture_snapshot() -> str:
             "<b>Architecture snapshot unavailable</b>\n\n"
             "LLM error — check logs."
         )
+
+
+def generate_social_posts(news_content: str, architecture_summary: str) -> dict[str, str]:
+    """Generate ready-to-copy LinkedIn + X/Twitter drafts.
+
+    Args:
+        news_content: Today's indexed AI news text (RSS/web).
+        architecture_summary: Concise architecture summary context.
+
+    Returns:
+        {"linkedin": "<post>", "twitter": "<thread>"}
+        All values are plain text (no HTML) for easy copy-paste.
+    """
+    llm = settings.get_fast_llm()
+
+    linkedin_chain = ChatPromptTemplate.from_messages([
+        ("system", _LINKEDIN_POST_SYSTEM),
+        ("human", _LINKEDIN_POST_HUMAN),
+    ]) | llm
+
+    twitter_chain = ChatPromptTemplate.from_messages([
+        ("system", _TWITTER_THREAD_SYSTEM),
+        ("human", _TWITTER_THREAD_HUMAN),
+    ]) | llm
+
+    linkedin_text = ""
+    twitter_text = ""
+
+    try:
+        li_resp = linkedin_chain.invoke({
+            "news_content": news_content,
+            "architecture_summary": architecture_summary,
+        })
+        linkedin_text = li_resp.content if hasattr(li_resp, "content") else str(li_resp)
+    except Exception:
+        logger.exception("Failed to generate LinkedIn draft")
+        linkedin_text = "LinkedIn draft unavailable (LLM error)."
+
+    try:
+        tw_resp = twitter_chain.invoke({
+            "news_content": news_content,
+            "architecture_summary": architecture_summary,
+        })
+        twitter_text = tw_resp.content if hasattr(tw_resp, "content") else str(tw_resp)
+    except Exception:
+        logger.exception("Failed to generate X/Twitter draft")
+        twitter_text = "Twitter draft unavailable (LLM error)."
+
+    return {
+        "linkedin": linkedin_text.strip(),
+        "twitter": twitter_text.strip(),
+    }

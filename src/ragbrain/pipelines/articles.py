@@ -146,6 +146,13 @@ class ArticlesPipeline:
         summaries.sort(key=lambda s: s.relevance_score, reverse=True)
         return summaries
 
+    def close(self) -> None:
+        """Release Qdrant and other resources held by the ingestion pipeline."""
+        try:
+            self._ingestor.close()
+        except Exception:
+            pass
+
     def _fetch_feeds(self, feed_urls: list[str], since: datetime) -> list[Document]:
         docs: list[Document] = []
         for url in feed_urls:

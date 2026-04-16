@@ -7,12 +7,12 @@ Commands:
   ragbrain serve                      Start Telegram bot (add --scheduler for vacation mode)
   ragbrain schedule                   Start the automated scheduler
   ragbrain fetch-articles             Fetch and summarize articles now
-  ragbrain ingest-slack               Ingest recent Slack news into knowledge base
+  ragbrain ingest-slack               (Optional) Ingest Slack messages into the knowledge base
   ragbrain review-architecture        Run the self-improvement architecture review
   ragbrain plan-upgrades              Run the Deep Agents upgrade planner
-  ragbrain slack-setup                Find bot DM channel and write to .env
+  ragbrain slack-setup                (Optional) Legacy Slack bot channel setup
   ragbrain run-automation             Run the full daily automation loop right now
-  ragbrain serve-slack                Start Slack approval poller + scheduler
+  ragbrain serve-slack                (Optional) Slack approval poller + scheduler
   ragbrain eval                       Run quality evaluation suites
   ragbrain tracing                    Show LangSmith tracing status
 """
@@ -234,7 +234,7 @@ def serve(
 
 @app.command()
 def schedule() -> None:
-    """Start the automated digest scheduler (morning articles + evening lessons)."""
+    """Start the automated digest scheduler (morning articles; optional evening book lesson)."""
     from ragbrain.scheduler import run_scheduler
 
     console.print("[green]Starting RAGBrain scheduler...[/green]")
@@ -258,8 +258,12 @@ def fetch_articles(
     fmt = DigestFormatter()
     feeds = list(feed_url) or None
 
+    ap = ArticlesPipeline()
     with console.status("[cyan]Fetching and summarizing articles...[/cyan]"):
-        summaries = ArticlesPipeline().run(feed_urls=feeds, also_ingest=not no_ingest)
+        try:
+            summaries = ap.run(feed_urls=feeds, also_ingest=not no_ingest)
+        finally:
+            ap.close()
 
     d = Digest(date=datetime.utcnow(), articles=summaries)
     console.print(fmt.format_cli(d))
@@ -307,26 +311,20 @@ def ingest_slack(
 
 @app.command(name="review-architecture")
 def review_architecture(
-    post_slack: bool = typer.Option(False, "--post-slack", help="Post the review back to Slack"),
+    post_telegram: bool = typer.Option(False, "--post-telegram", help="Post the review to Telegram"),
+    post_slack: bool = typer.Option(False, "--post-slack", help="(Legacy) Post the review to Slack"),
 ) -> None:
     """Run the architecture review agent — analyses recent AI news against RAGBrain's design."""
-    from ragbrain.config import settings as _settings
-
-    if not _settings.slack_bot_token or not _settings.slack_channel_id:
-        console.print(
-            "[red]Error:[/red] Slack integration required. Set RAGBRAIN_SLACK_BOT_TOKEN and "
-            "RAGBRAIN_SLACK_CHANNEL_ID in .env"
-        )
-        raise typer.Exit(1)
-
     from ragbrain.pipelines.architecture_review import run_review
 
     with console.status("[cyan]Running architecture review...[/cyan]"):
-        report = run_review(post_slack=post_slack)
+        report = run_review(post_slack=post_slack, post_telegram=post_telegram)
 
     console.print()
     console.print(Panel(report, title="[bold]Architecture Review[/bold]", border_style="blue"))
 
+    if post_telegram:
+        console.print("[green]Review posted to Telegram.[/green]")
     if post_slack:
         console.print("[green]Review posted to Slack.[/green]")
 
@@ -565,33 +563,21 @@ def eval(
 
 @app.command(name="plan-upgrades")
 def plan_upgrades(
-    post_slack: bool = typer.Option(False, "--post-slack", help="Post the plan back to Slack"),
-    lookback: int = typer.Option(
-        24, "--lookback", "-l", help="Hours of Slack news to consider (default: 24)"
-    ),
+    post_telegram: bool = typer.Option(False, "--post-telegram", help="Post the plan to Telegram"),
 ) -> None:
     """Run the Deep Agents upgrade planner.
 
-    The agent reads ARCHITECTURE.md + upgrade history, fetches recent Slack
-    news, searches the knowledge base, and produces a prioritised upgrade plan.
+    The agent reads ARCHITECTURE.md + upgrade history, fetches recent RSS
+    articles, and produces a prioritised upgrade plan.
     Results are persisted to architecture-state.md for future runs.
     """
-    from ragbrain.config import settings as _settings
-
-    if not _settings.slack_bot_token or not _settings.slack_channel_id:
-        console.print(
-            "[red]Error:[/red] Slack integration required for news fetching.\n"
-            "Set RAGBRAIN_SLACK_BOT_TOKEN and RAGBRAIN_SLACK_CHANNEL_ID in .env"
-        )
-        raise typer.Exit(1)
-
     from ragbrain.pipelines.upgrade_planner import run_upgrade_planner
 
     console.print("[cyan]Starting Deep Agents upgrade planner...[/cyan]")
     console.print("[dim]The agent will call multiple tools — this may take a minute.[/dim]\n")
 
     with console.status("[cyan]Planning architecture upgrades...[/cyan]"):
-        report = run_upgrade_planner(post_slack=post_slack)
+        report = run_upgrade_planner(post_telegram=post_telegram)
 
     console.print()
     console.print(Panel(report, title="[bold]Upgrade Plan[/bold]", border_style="magenta"))
@@ -604,8 +590,8 @@ def plan_upgrades(
             f"for cross-run memory.[/dim]"
         )
 
-    if post_slack:
-        console.print("[green]Plan posted to Slack.[/green]")
+    if post_telegram:
+        console.print("[green]Plan posted to Telegram.[/green]")
 
 
 # ---- helpers for run-automation --------------------------------------
@@ -615,44 +601,45 @@ def _planner_worker(queue) -> None:
     try:
         from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
         recs = get_upgrade_recommendations()
-        queue.put(recs)
+        queue.put(("ok", recs))
     except Exception as exc:
-        queue.put(exc)
+        queue.put(("error", str(exc)))
 
 
-def _run_planner_with_timeout(timeout: int) -> list:
+def _run_planner_with_timeout(timeout: int, retries: int = 2) -> tuple[list, str | None]:
     """Run get_upgrade_recommendations() in a subprocess with a hard kill timeout.
 
     Uses multiprocessing.Process (not threading) so the process can be
     SIGKILL'd if it hangs — threads cannot be force-killed in Python.
-    Returns a list of recommendation dicts, or [] on timeout / error.
+    Returns (recs, error_reason). Adds one retry by default for transient failures.
     """
     import multiprocessing
 
-    ctx = multiprocessing.get_context("spawn")   # safe on macOS with fork issues
-    q: multiprocessing.Queue = ctx.Queue()
-    p = ctx.Process(target=_planner_worker, args=(q,), daemon=True)
-    p.start()
-    p.join(timeout=timeout)
+    last_reason: str | None = None
 
-    if p.is_alive():
-        p.kill()
-        p.join(timeout=5)
-        console.print(
-            f"  [yellow]UpgradePlanner timed out after {timeout}s "
-            f"— skipping proposals for today.[/yellow]\n"
-            "  [dim](Briefing was already sent successfully.)[/dim]"
-        )
-        return []
+    for attempt in range(1, retries + 1):
+        ctx = multiprocessing.get_context("spawn")   # safe on macOS with fork issues
+        q: multiprocessing.Queue = ctx.Queue()
+        p = ctx.Process(target=_planner_worker, args=(q,), daemon=True)
+        p.start()
+        p.join(timeout=timeout)
 
-    if not q.empty():
-        result = q.get_nowait()
-        if isinstance(result, Exception):
-            console.print(f"  [yellow]UpgradePlanner error:[/yellow] {result}")
-            return []
-        return result if isinstance(result, list) else []
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=5)
+            last_reason = f"timeout after {timeout}s (attempt {attempt}/{retries})"
+            continue
 
-    return []
+        if not q.empty():
+            status, payload = q.get_nowait()
+            if status == "ok" and isinstance(payload, list):
+                return payload, None
+            last_reason = str(payload)
+            continue
+
+        last_reason = f"no result returned (attempt {attempt}/{retries})"
+
+    return [], last_reason
 
 
 # ---- run-automation --------------------------------------------------
@@ -670,8 +657,8 @@ def run_automation(
     - Debug issues without waiting for the cron to fire
 
     Steps:
-      1. Ingest recent Slack news into knowledge base
-      2. Generate daily briefing (what Tuk covered + RAGBrain relevance)
+      1. Fetch RSS articles and index into the knowledge base
+      2. Generate daily briefing (AI news + RAGBrain relevance)
       3. Run UpgradePlanner → create Proposals → send to Telegram with buttons
     """
     from ragbrain.config import settings as _s
@@ -682,39 +669,49 @@ def run_automation(
             "Running anyway (you triggered this manually).\n"
         )
 
-    # ---- Step 1: Ingest Slack news -----------------------------------
-    console.print("[cyan]Step 1/3 — Ingesting Slack news...[/cyan]")
-    ingested_count = 0
+    # ---- Step 1: RSS articles → knowledge base ----------------------
+    console.print("[cyan]Step 1/3 — Fetching RSS articles...[/cyan]")
+    article_count = 0
     try:
-        from ragbrain.ingestion.extractors.slack import SlackExtractor
-        from ragbrain.ingestion.pipeline import IngestionPipeline
+        from ragbrain.pipelines.articles import ArticlesPipeline
 
-        extractor = SlackExtractor(fetch_urls=False)
-        with console.status("Fetching from Slack..."):
-            docs = extractor.extract_recent()
-
-        if docs:
-            pipeline = IngestionPipeline()
+        ap = ArticlesPipeline()
+        with console.status("Fetching and indexing articles..."):
             try:
-                for doc in docs:
-                    pipeline.ingest_document(doc)
-                ingested_count = len(docs)
+                summaries = ap.run(also_ingest=True)
+                article_count = len(summaries)
             finally:
-                pipeline.close()   # release Qdrant lock before step 2 opens it
-            console.print(f"  [green]✓[/green] Ingested {ingested_count} Slack messages.")
+                ap.close()
+        if article_count:
+            console.print(f"  [green]✓[/green] Processed {article_count} article(s); KB updated.")
         else:
-            console.print("  [yellow]No new Slack messages found.[/yellow]")
+            console.print(
+                "  [yellow]No articles in the lookback window — check RAGBRAIN_RSS_FEEDS_STR.[/yellow]"
+            )
     except Exception as e:
-        console.print(f"  [red]Slack ingestion failed:[/red] {e}")
+        console.print(f"  [red]Article fetch failed:[/red] {e}")
 
     # ---- Step 2: Daily briefing --------------------------------------
     console.print("\n[cyan]Step 2/3 — Generating daily briefing...[/cyan]")
     briefing = ""
+    social_posts: dict[str, str] = {}
     try:
-        from ragbrain.pipelines.daily_briefing import generate_daily_briefing
+        from ragbrain.pipelines.daily_briefing import (
+            generate_daily_briefing,
+            generate_social_posts,
+            get_daily_inputs,
+        )
 
         with console.status("Generating briefing with LLM..."):
-            briefing = generate_daily_briefing()
+            news_content, arch_summary = get_daily_inputs()
+            briefing = generate_daily_briefing(
+                news_content=news_content,
+                architecture_summary=arch_summary,
+            )
+            social_posts = generate_social_posts(
+                news_content=news_content,
+                architecture_summary=arch_summary,
+            )
 
         # Print a plain-text preview (strip HTML tags for CLI)
         import re
@@ -725,26 +722,27 @@ def run_automation(
 
         if not dry_run:
             sent_any = False
-            # Try Slack first
-            from ragbrain.delivery.slack_delivery import post_briefing
-            if _s.slack_bot_token and (_s.slack_bot_channel_id or _s.slack_post_channel_id or _s.slack_channel_id):
-                ok = post_briefing(briefing)
-                if ok:
-                    console.print("  [green]✓[/green] Briefing sent to Slack.")
-                    sent_any = True
-            # Try Telegram
             if _s.telegram_bot_token and _s.telegram_chat_id:
                 import asyncio, re as _re
                 plain = _re.sub(r"<[^>]+>", "", briefing)
                 from ragbrain.scheduler import _send_telegram
                 asyncio.run(_send_telegram(plain))
                 console.print("  [green]✓[/green] Briefing sent to Telegram.")
+                if social_posts:
+                    import html as _html
+                    social_msg = (
+                        "--- LinkedIn Draft ---\n"
+                        f"{social_posts.get('linkedin', '').strip()}\n\n"
+                        "--- X/Twitter Thread ---\n"
+                        f"{social_posts.get('twitter', '').strip()}"
+                    )
+                    asyncio.run(_send_telegram(_html.escape(social_msg)))
+                    console.print("  [green]✓[/green] Social post drafts sent to Telegram.")
                 sent_any = True
             if not sent_any:
                 console.print(
                     "  [yellow]No delivery channel configured.[/yellow]\n"
-                    "  Run [cyan]ragbrain telegram-setup[/cyan] to connect Telegram (recommended),\n"
-                    "  or [cyan]ragbrain slack-setup[/cyan] for Slack."
+                    "  Run [cyan]ragbrain telegram-setup[/cyan] to connect Telegram."
                 )
         else:
             console.print("  [dim]Dry-run: send skipped.[/dim]")
@@ -759,10 +757,16 @@ def run_automation(
 
             _PLANNER_TIMEOUT = 180  # 3 minutes hard kill
             with console.status("Planning upgrades with Deep Agents..."):
-                recs = _run_planner_with_timeout(_PLANNER_TIMEOUT)
+                recs, planner_reason = _run_planner_with_timeout(_PLANNER_TIMEOUT, retries=2)
 
             if not recs:
-                console.print("  [yellow]No recommendations returned.[/yellow]")
+                if planner_reason:
+                    console.print(
+                        f"  [yellow]No recommendations returned.[/yellow]\n"
+                        f"  [dim]Planner fallback: {planner_reason}[/dim]"
+                    )
+                else:
+                    console.print("  [yellow]No recommendations returned.[/yellow]")
             else:
                 store = get_store()
                 sent = 0
@@ -792,20 +796,9 @@ def run_automation(
                                     await tg_send(bot, int(_s.telegram_chat_id), proposal)
                             asyncio.run(_tg())
                             sent += 1
-                        # Also send to Slack if configured (text-based)
-                        elif _s.slack_bot_token and (_s.slack_bot_channel_id or _s.slack_channel_id):
-                            from ragbrain.delivery.slack_delivery import post_proposal
-                            if post_proposal(proposal):
-                                sent += 1
-
                 if sent:
-                    channels = []
-                    if _s.telegram_bot_token and _s.telegram_chat_id:
-                        channels.append("[cyan]Telegram[/cyan] (tap Approve/Skip buttons)")
-                    if _s.slack_bot_token and (_s.slack_bot_channel_id or _s.slack_channel_id):
-                        channels.append("[cyan]Slack[/cyan] (reply approve <id>)")
                     console.print(
-                        f"\n  [green]✓[/green] {sent} proposal(s) sent to {' + '.join(channels) or 'delivery channel'}."
+                        f"\n  [green]✓[/green] {sent} proposal(s) sent to [cyan]Telegram[/cyan] (tap Approve/Skip buttons)."
                     )
                 elif dry_run:
                     console.print("  [dim]Dry-run: send skipped.[/dim]")
@@ -823,17 +816,15 @@ def run_automation(
     console.print()
     from ragbrain.config import settings as _sf
     _has_tg = bool(_sf.telegram_bot_token and _sf.telegram_chat_id)
-    _has_slack = bool(_sf.slack_bot_token and (_sf.slack_bot_channel_id or _sf.slack_channel_id))
     if _has_tg:
         _next_step = "Run [cyan]ragbrain serve[/cyan] to handle Telegram Approve/Skip button taps."
-    elif _has_slack:
-        _next_step = "Reply [cyan]approve <id>[/cyan] in Slack. Run [cyan]ragbrain serve-slack[/cyan]."
     else:
         _next_step = "Run [cyan]ragbrain telegram-setup[/cyan] to connect a delivery channel."
 
     console.print(Panel(
-        f"Slack messages ingested: [bold]{ingested_count}[/bold]\n"
+        f"RSS articles processed:  [bold]{article_count}[/bold]\n"
         f"Briefing generated:      [bold]{'yes' if briefing else 'no'}[/bold]\n"
+        f"Social drafts generated: [bold]{'yes' if social_posts else 'no'}[/bold]\n"
         f"Proposals stored:        [cyan]~/.ragbrain/proposals.json[/cyan]\n\n"
         f"[dim]{_next_step}[/dim]",
         title="[bold]Automation Run Complete[/bold]",

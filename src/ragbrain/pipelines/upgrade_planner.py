@@ -4,12 +4,12 @@ Architecture:
     A Deep Agents orchestrator (claude-sonnet-4-6) is given four tools:
         read_architecture()         → loads ARCHITECTURE.md
         read_architecture_state()   → loads persistent upgrade history
-        fetch_slack_news()          → recent AI news from Slack
+        fetch_rss_news()            → recent AI news from configured RSS feeds
         search_knowledge_base()     → queries our own Qdrant RAG pipeline
 
     The agent autonomously:
       1. Gathers current architecture + history
-      2. Pulls recent Slack news
+      2. Pulls recent RSS / web article summaries
       3. Searches the KB for relevant research already indexed
       4. Plans upgrades (HIGH / MEDIUM / LOW), using its built-in write_todos
          to track sub-tasks within the session
@@ -19,7 +19,7 @@ Architecture:
     runs remember what was already discussed.
 
 Usage:
-    ragbrain plan-upgrades [--post-slack]
+    ragbrain plan-upgrades [--post-telegram]
 """
 
 from __future__ import annotations
@@ -96,33 +96,42 @@ def read_architecture_state() -> str:
 
 
 @tool
-def fetch_slack_news(lookback_hours: int = 24) -> str:
-    """Fetch recent AI news from the configured Slack channel.
+def fetch_rss_news(lookback_hours: int = 24) -> str:
+    """Fetch recent AI news from configured RSS feeds (same source as daily digest).
+
+    Indexes full articles into the knowledge base when also_ingest=True.
 
     Args:
         lookback_hours: How many hours back to look (default 24).
 
     Returns:
-        Formatted list of news items with titles and excerpts.
+        Formatted list of news items with titles and summaries.
     """
     try:
-        from ragbrain.ingestion.extractors.slack import SlackExtractor
+        from ragbrain.pipelines.articles import ArticlesPipeline
 
-        extractor = SlackExtractor(fetch_urls=False)
-        docs = extractor.extract_recent(lookback_hours=lookback_hours)
+        ap = ArticlesPipeline()
+        try:
+            summaries = ap.run(lookback_hours=lookback_hours, also_ingest=True)
+        finally:
+            ap.close()
     except Exception as e:
-        return f"Could not fetch Slack news: {e}"
+        return f"Could not fetch RSS news: {e}"
 
-    if not docs:
-        return f"No messages found in the last {lookback_hours} hours."
+    if not summaries:
+        return (
+            f"No articles found in the last {lookback_hours}h — "
+            "check RAGBRAIN_RSS_FEEDS_STR in .env."
+        )
 
     items = []
-    for i, doc in enumerate(docs, 1):
-        title = doc.title or "Untitled"
-        excerpt = (doc.raw_text or "")[:600].replace("\n", " ")
-        items.append(f"{i}. **{title}**\n   {excerpt}")
+    for i, s in enumerate(summaries, 1):
+        title = s.title or "Untitled"
+        takeaway = (s.key_takeaway or "").replace("\n", " ")
+        body = (s.summary or "")[:500].replace("\n", " ")
+        items.append(f"{i}. **{title}**\n   {takeaway}\n   {body}")
 
-    return f"Found {len(docs)} news items in the last {lookback_hours}h:\n\n" + "\n\n".join(items)
+    return f"Found {len(summaries)} articles in the last {lookback_hours}h:\n\n" + "\n\n".join(items)
 
 
 @tool
@@ -252,14 +261,14 @@ def _format_plan(plan: UpgradePlan, date_str: str) -> str:
 # Main runner
 # ---------------------------------------------------------------------------
 
-def run_upgrade_planner(post_slack: bool = False) -> str:
+def run_upgrade_planner(post_telegram: bool = False) -> str:
     """Run the Deep Agents upgrade planner.
 
     The agent gathers news, searches the KB, and produces a prioritised
     UpgradePlan. Results are persisted to architecture-state.md.
 
     Args:
-        post_slack: If True, also post the report to Slack.
+        post_telegram: If True, also post the report to Telegram.
 
     Returns:
         Formatted report string.
@@ -276,7 +285,7 @@ whose job is to keep RAGBrain at the state of the art.
 Your workflow for EVERY run:
 1. Call read_architecture() to understand what RAGBrain currently implements.
 2. Call read_architecture_state() to see what was planned in prior runs.
-3. Call fetch_slack_news() to get today's AI research signals.
+3. Call fetch_rss_news() to get today's AI research signals.
 4. For each interesting news item, call search_knowledge_base() to check if
    RAGBrain's indexed documents already contain relevant papers or context.
 5. Synthesise everything into a prioritised upgrade plan.
@@ -300,10 +309,10 @@ Today's date: {date_str}
         tools=[
             read_architecture,
             read_architecture_state,
-            fetch_slack_news,
+            fetch_rss_news,
             # search_knowledge_base intentionally excluded: it opens Qdrant which
             # is already held by the main process, causing "already accessed" hangs.
-            # The planner gets sufficient signal from Slack news + architecture docs.
+            # The planner gets sufficient signal from RSS news + architecture docs.
         ],
         system_prompt=system_prompt,
         checkpointer=checkpointer,
@@ -319,7 +328,7 @@ Today's date: {date_str}
                 "content": (
                     "Please analyse recent AI news and compare it against RAGBrain's "
                     "architecture. Use read_architecture, read_architecture_state, and "
-                    "fetch_slack_news to gather information, then produce a prioritised "
+                    "fetch_rss_news to gather information, then produce a prioritised "
                     "upgrade plan."
                 ),
             }]
@@ -343,12 +352,17 @@ Today's date: {date_str}
                 break
         report = f"RAGBrain Upgrade Plan — {date_str}\n{'=' * 55}\n\n{last_content}"
 
-    if post_slack:
+    if post_telegram:
         try:
-            from ragbrain.pipelines.architecture_review import post_to_slack
-            post_to_slack(report)
+            from ragbrain.delivery.telegram import notify_telegram_html_sync
+
+            # Report is plain text with markdown-ish ** — escape for Telegram HTML safety
+            import html as html_lib
+
+            safe = html_lib.escape(report)
+            notify_telegram_html_sync(f"<pre>{safe}</pre>")
         except Exception:
-            logger.exception("Failed to post upgrade plan to Slack")
+            logger.exception("Failed to post upgrade plan to Telegram")
 
     return report
 
@@ -369,7 +383,7 @@ def get_upgrade_recommendations() -> list[dict]:
 
     system_prompt = f"""\
 You are RAGBrain's architecture upgrade planner.
-Use read_architecture, read_architecture_state, and fetch_slack_news to gather
+Use read_architecture, read_architecture_state, and fetch_rss_news to gather
 information, then return a prioritised UpgradePlan.
 Today's date: {date_str}
 """
@@ -378,7 +392,7 @@ Today's date: {date_str}
         model=settings.get_llm(),
         # search_knowledge_base excluded — it opens Qdrant which is already
         # held by the main process, causing "already accessed" deadlocks.
-        tools=[read_architecture, read_architecture_state, fetch_slack_news],
+        tools=[read_architecture, read_architecture_state, fetch_rss_news],
         system_prompt=system_prompt,
         checkpointer=checkpointer,
         response_format=UpgradePlan,

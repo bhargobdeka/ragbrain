@@ -13,7 +13,7 @@ RAGBrain is a framework for building a personal knowledge base powered by advanc
 - **Ingest anything** — PDFs (books, papers), web articles, Substack, Medium, RSS feeds
 - **Advanced retrieval** — Hybrid dense + BM25 search, RRF fusion, CrossEncoder reranking
 - **Agentic RAG** — CRAG (Corrective RAG) + Self-Reflective RAG via LangGraph
-- **Daily digests** — Morning article summaries + evening book lessons via Telegram
+- **Daily digests** — Morning article summaries via Telegram; optional evening book lesson (off by default)
 - **BYOK** — Bring Your Own (Anthropic) API key; embeddings and reranking run locally for free
 
 ---
@@ -54,7 +54,7 @@ Raw Sources (PDF / Web / RSS)
    Delivery
    ├── Telegram bot (/query, /digest, /ingest)
    ├── CLI (ragbrain query "...")
-   └── Scheduler (morning articles + evening book lesson)
+   └── Scheduler (morning articles; optional evening book lesson)
 ```
 
 ---

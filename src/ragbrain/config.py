@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
-    # ---- Slack (for reading AI news + posting review output) ------
+    # ---- Slack (optional legacy — daily news uses RSS + Telegram by default) ------
     slack_bot_token: str = ""
     slack_channel_id: str = ""      # channel/DM where AI news arrives (read-only for ingestion)
     slack_post_channel_id: str = "" # where to post review results (defaults to slack_channel_id)
@@ -105,6 +105,9 @@ class Settings(BaseSettings):
     article_lookback_hours: int = 24
     morning_cron: str = "0 8 * * *"
     evening_cron: str = "0 19 * * *"
+    # Evening scheduled book lesson to Telegram (uses evening_cron). Off by default.
+    # Set RAGBRAIN_EVENING_BOOK_LESSON_ENABLED=true to enable.
+    evening_book_lesson_enabled: bool = False
 
     # ---- Book pipeline ---------------------------------------------
     inbox_dir: str = "./inbox"
@@ -121,6 +124,9 @@ class Settings(BaseSettings):
     # Minimum eval pass rate required before committing an auto-implemented change.
     # (env var: RAGBRAIN_EVAL_PASS_THRESHOLD)
     eval_pass_threshold: float = 0.70
+    # Optional extra review job (disabled by default to reduce vacation-time noise).
+    # If enabled, scheduler runs architecture_review_job at +30 min after morning cron.
+    architecture_review_enabled: bool = False
 
     # ---- Parsed list properties ------------------------------------
 

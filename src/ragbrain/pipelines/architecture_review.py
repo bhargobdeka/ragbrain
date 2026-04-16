@@ -1,13 +1,13 @@
 """Architecture Review Agent — self-improving RAG pipeline.
 
-Reads recent AI news from Slack (via SlackExtractor), loads RAGBrain's
-ARCHITECTURE.md self-description, then uses an LLM to perform gap analysis
-and generate prioritised upgrade recommendations.
+Loads recent AI news from configured RSS feeds (same as the article digest),
+loads RAGBrain's ARCHITECTURE.md self-description, then uses an LLM to perform
+gap analysis and generate prioritised upgrade recommendations.
 
 LangGraph pipeline:
     fetch_news → load_architecture → gap_analysis → format_report
 
-The report can be posted back to Slack and/or printed to CLI.
+The report can be posted to Telegram and/or printed to CLI.
 """
 
 from __future__ import annotations
@@ -68,18 +68,25 @@ class ReviewOutput(BaseModel):
 # ---------------------------------------------------------------------------
 
 def fetch_news(state: ReviewState) -> dict:
-    """Read recent messages from the Slack news channel."""
-    from ragbrain.ingestion.extractors.slack import SlackExtractor
+    """Load recent article summaries from RSS feeds (and index into Qdrant)."""
+    from ragbrain.pipelines.articles import ArticlesPipeline
 
-    extractor = SlackExtractor(fetch_urls=False)
-    docs = extractor.extract_recent()
+    ap = ArticlesPipeline()
+    try:
+        summaries = ap.run(also_ingest=True)
+    finally:
+        ap.close()
 
-    news_items = [doc.raw_text[:3000] for doc in docs if doc.raw_text.strip()]
+    news_items = []
+    for s in summaries:
+        block = f"{s.title}\n{s.key_takeaway}\n{s.summary}"
+        if block.strip():
+            news_items.append(block[:3000])
 
     if not news_items:
-        return {"news_items": [], "error": "No recent Slack messages found."}
+        return {"news_items": [], "error": "No recent articles found — check RAGBRAIN_RSS_FEEDS_STR."}
 
-    logger.info("Fetched %d news briefings from Slack.", len(news_items))
+    logger.info("Fetched %d article summaries from RSS.", len(news_items))
     return {"news_items": news_items}
 
 
@@ -222,7 +229,7 @@ def build_review_graph():
 # ---------------------------------------------------------------------------
 
 def post_to_slack(report: str) -> bool:
-    """Post the review report to the configured Slack channel.
+    """Post the review report to the configured Slack channel (legacy).
 
     Returns True on success, False on failure.
     """
@@ -245,11 +252,32 @@ def post_to_slack(report: str) -> bool:
         return False
 
 
-def run_review(post_slack: bool = False) -> str:
+def post_to_telegram(report: str) -> bool:
+    """Post the review report to the configured Telegram chat."""
+    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        logger.warning("Telegram not configured — cannot post review.")
+        return False
+
+    try:
+        import html as html_lib
+
+        from ragbrain.delivery.telegram import notify_telegram_html_sync
+
+        safe = html_lib.escape(report)
+        notify_telegram_html_sync(f"<pre>{safe}</pre>")
+        logger.info("Posted architecture review to Telegram.")
+        return True
+    except Exception:
+        logger.exception("Failed to post architecture review to Telegram")
+        return False
+
+
+def run_review(post_slack: bool = False, post_telegram: bool = False) -> str:
     """Run the full architecture review pipeline.
 
     Args:
-        post_slack: If True, also post results to Slack.
+        post_slack: If True, also post results to Slack (legacy).
+        post_telegram: If True, also post results to Telegram.
 
     Returns:
         The formatted report string.
@@ -265,6 +293,8 @@ def run_review(post_slack: bool = False) -> str:
     final = graph.invoke(initial_state)
     report = final.get("report", "No report generated.")
 
+    if post_telegram:
+        post_to_telegram(report)
     if post_slack:
         post_to_slack(report)
 

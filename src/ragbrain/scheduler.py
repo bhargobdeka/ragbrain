@@ -2,13 +2,14 @@
 
 Jobs:
   - Morning (8 AM UTC, default):
-      * daily_automation_job  — ingest Slack news, send daily briefing,
+      * daily_automation_job  — ingest RSS articles, send daily briefing,
                                 run UpgradePlanner, post proposals to Telegram
       * morning_digest_job    — existing article digest
   - Evening (7 PM UTC, default):
-      * architecture_snapshot_job — plain-English snapshot sent to Telegram
-      * evening_lesson_job        — existing book lesson
-  - 8:30 AM UTC: architecture_review_job (if Slack configured)
+      * architecture_snapshot_job — plain-English snapshot sent to Telegram (automation on)
+      * evening_lesson_job        — book lesson to Telegram (only if
+        RAGBRAIN_EVENING_BOOK_LESSON_ENABLED=true)
+  - 8:30 AM UTC: architecture_review_job (only if explicitly enabled)
 
 The daily_automation_job and architecture_snapshot_job only run when
 RAGBRAIN_AUTOMATION_ENABLED=true is set in your .env file.
@@ -18,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -31,6 +34,22 @@ from ragbrain.pipelines.books import BooksPipeline
 
 logger = logging.getLogger(__name__)
 formatter = DigestFormatter()
+
+
+def _notify_status(message: str) -> None:
+    """Best-effort status notification via Telegram when configured."""
+    try:
+        if settings.telegram_bot_token and settings.telegram_chat_id:
+            asyncio.run(_send_telegram(message))
+        else:
+            logger.info("Status (no Telegram): %s", message)
+    except Exception:
+        logger.exception("Failed to send status notification: %s", message)
+
+
+def scheduler_heartbeat_job() -> None:
+    """Periodic heartbeat so we can confirm scheduler liveness in logs."""
+    logger.info("Scheduler heartbeat: alive at %s", datetime.utcnow().isoformat())
 
 
 async def _send_proposal_telegram(proposal) -> None:
@@ -62,27 +81,9 @@ async def _send_proposal_telegram(proposal) -> None:
 
 async def _send_telegram(message: str) -> None:
     """Send a message via Telegram bot if configured."""
-    token = settings.telegram_bot_token
-    chat_id = settings.telegram_chat_id
-    if not token or not chat_id:
-        return
+    from ragbrain.delivery.telegram import notify_telegram_html
 
-    from telegram import Bot
-    from telegram.constants import ParseMode
-
-    bot = Bot(token=token)
-    # Split message if too long
-    limit = 4000
-    text = message
-    async with bot:
-        while len(text) > limit:
-            split_at = text.rfind("\n", 0, limit)
-            if split_at == -1:
-                split_at = limit
-            await bot.send_message(chat_id=chat_id, text=text[:split_at], parse_mode=ParseMode.HTML)
-            text = text[split_at:].lstrip("\n")
-        if text:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+    await notify_telegram_html(message)
 
 
 def morning_digest_job() -> None:
@@ -131,46 +132,55 @@ def _planner_subprocess_worker(queue) -> None:
     """Subprocess worker: runs the planner and sends results via Queue."""
     try:
         from ragbrain.pipelines.upgrade_planner import get_upgrade_recommendations
-        queue.put(get_upgrade_recommendations())
+        queue.put(("ok", get_upgrade_recommendations()))
     except Exception as exc:
-        queue.put(exc)
+        queue.put(("error", str(exc)))
 
 
-def _run_planner_subprocess(timeout: int) -> list:
+def _run_planner_subprocess(timeout: int, retries: int = 2) -> tuple[list, str | None]:
     """Run upgrade planner in a subprocess with a hard kill timeout.
 
     Uses multiprocessing.Process so a hung planner is SIGKILL'd after
     `timeout` seconds — threads cannot be force-killed in Python.
+    Retries once by default for transient network/API timeouts.
     """
     import multiprocessing
 
-    ctx = multiprocessing.get_context("spawn")
-    q: multiprocessing.Queue = ctx.Queue()
-    p = ctx.Process(target=_planner_subprocess_worker, args=(q,), daemon=True)
-    p.start()
-    p.join(timeout=timeout)
+    last_reason: str | None = None
 
-    if p.is_alive():
-        p.kill()
-        p.join(timeout=5)
-        logger.warning("UpgradePlanner killed after %ds timeout — skipping proposals.", timeout)
-        return []
+    for attempt in range(1, retries + 1):
+        ctx = multiprocessing.get_context("spawn")
+        q: multiprocessing.Queue = ctx.Queue()
+        p = ctx.Process(target=_planner_subprocess_worker, args=(q,), daemon=True)
+        p.start()
+        p.join(timeout=timeout)
 
-    if not q.empty():
-        result = q.get_nowait()
-        if isinstance(result, Exception):
-            logger.warning("UpgradePlanner error: %s", result)
-            return []
-        return result if isinstance(result, list) else []
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=5)
+            last_reason = f"timeout after {timeout}s (attempt {attempt}/{retries})"
+            logger.warning("UpgradePlanner %s", last_reason)
+            continue
 
-    return []
+        if not q.empty():
+            status, payload = q.get_nowait()
+            if status == "ok" and isinstance(payload, list):
+                return payload, None
+            last_reason = str(payload)
+            logger.warning("UpgradePlanner error (attempt %d/%d): %s", attempt, retries, last_reason)
+            continue
+
+        last_reason = f"no result returned (attempt {attempt}/{retries})"
+        logger.warning("UpgradePlanner %s", last_reason)
+
+    return [], last_reason
 
 
 def daily_automation_job() -> None:
     """Daily automation loop — runs at 8 AM UTC when automation is enabled.
 
     Steps:
-    1. Ingest recent Slack news into the knowledge base.
+    1. Fetch and ingest recent RSS articles into the knowledge base.
     2. Generate a mobile-friendly learning briefing and send to Telegram.
     3. Run the UpgradePlanner to generate 1-3 proposals.
     4. Persist proposals in ProposalStore and send each to Telegram with buttons.
@@ -180,55 +190,80 @@ def daily_automation_job() -> None:
         return
 
     logger.info("Running daily automation job...")
+    _notify_status(
+        "RAGBrain: Daily automation started. Ingesting RSS articles, generating briefing, and planning proposals."
+    )
 
-    # ---- Step 1: Ingest Slack news -----------------------------------
+    # ---- Step 1: RSS articles → knowledge base ----------------------
     try:
-        from ragbrain.ingestion.extractors.slack import SlackExtractor
-        from ragbrain.ingestion.pipeline import IngestionPipeline
+        from ragbrain.pipelines.articles import ArticlesPipeline
 
-        extractor = SlackExtractor(fetch_urls=False)
-        docs = extractor.extract_recent()
-        if docs:
-            pipeline = IngestionPipeline()
-            try:
-                for doc in docs:
-                    pipeline.ingest_document(doc)
-            finally:
-                pipeline.close()   # release Qdrant lock before next step opens it
-            logger.info("Ingested %d Slack news messages.", len(docs))
-        else:
-            logger.info("No new Slack messages found.")
+        ap = ArticlesPipeline()
+        try:
+            summaries = ap.run(also_ingest=True)
+            logger.info("Articles pipeline: %d summaries, KB updated.", len(summaries))
+        finally:
+            ap.close()
     except Exception:
-        logger.exception("Slack ingestion failed in daily_automation_job")
+        logger.exception("RSS/article ingestion failed in daily_automation_job")
 
     # ---- Step 2: Daily briefing -------------------------------------
     try:
+        import html
         import re as _re
-        from ragbrain.pipelines.daily_briefing import generate_daily_briefing
+        from ragbrain.pipelines.daily_briefing import (
+            generate_daily_briefing,
+            generate_social_posts,
+            get_daily_inputs,
+        )
 
-        briefing = generate_daily_briefing()
+        news_content, arch_summary = get_daily_inputs()
+        briefing = generate_daily_briefing(
+            news_content=news_content,
+            architecture_summary=arch_summary,
+        )
+        social_posts = generate_social_posts(
+            news_content=news_content,
+            architecture_summary=arch_summary,
+        )
 
         # Prefer Telegram (richer mobile experience)
         if settings.telegram_bot_token and settings.telegram_chat_id:
             plain = _re.sub(r"<[^>]+>", "", briefing)
             asyncio.run(_send_telegram(plain))
+            if social_posts:
+                social_msg = (
+                    "--- LinkedIn Draft ---\n"
+                    f"{social_posts.get('linkedin', '').strip()}\n\n"
+                    "--- X/Twitter Thread ---\n"
+                    f"{social_posts.get('twitter', '').strip()}"
+                )
+                asyncio.run(_send_telegram(html.escape(social_msg)))
             logger.info("Daily briefing sent to Telegram.")
         else:
-            from ragbrain.delivery.slack_delivery import post_briefing
-            post_briefing(briefing)
-            logger.info("Daily briefing sent to Slack.")
+            logger.warning(
+                "Daily briefing generated but Telegram not configured — nowhere to send."
+            )
     except Exception:
         logger.exception("Daily briefing failed in daily_automation_job")
+        _notify_status("RAGBrain: Daily automation warning — briefing generation failed. Check logs.")
 
     # ---- Step 3 + 4: Upgrade proposals --------------------------------
     try:
         from ragbrain.pipelines.proposals import Proposal, get_store
 
         _PLANNER_TIMEOUT = 180  # 3 minutes hard kill via subprocess
-        recs = _run_planner_subprocess(_PLANNER_TIMEOUT)
+        recs, planner_reason = _run_planner_subprocess(_PLANNER_TIMEOUT, retries=2)
 
         if not recs:
             logger.info("UpgradePlanner returned no recommendations.")
+            if planner_reason:
+                fallback = (
+                    "Planner fallback: Upgrade recommendations unavailable this run "
+                    f"({planner_reason}). Briefing was still delivered."
+                )
+                _notify_status(fallback)
+            _notify_status("RAGBrain: Daily automation finished with no proposals.")
             return
 
         store = get_store()
@@ -247,61 +282,102 @@ def daily_automation_job() -> None:
             )
             store.add(proposal)
 
-            # Prefer Telegram (inline buttons) over Slack (text reply)
             if settings.telegram_bot_token and settings.telegram_chat_id:
                 asyncio.run(_send_proposal_telegram(proposal))
-            elif settings.slack_bot_token:
-                from ragbrain.delivery.slack_delivery import post_proposal
-                post_proposal(proposal)
+            else:
+                logger.warning("Proposal %s created but Telegram not configured.", proposal.id)
 
         logger.info("Sent %d proposals to delivery channel.", min(len(recs), 3))
+        _notify_status(
+            f"RAGBrain: Daily automation finished successfully. Sent {min(len(recs), 3)} proposal(s)."
+        )
     except Exception:
         logger.exception("Upgrade planner failed in daily_automation_job")
+        _notify_status("RAGBrain: Daily automation warning — planner failed. Briefing was still delivered.")
 
 
 def architecture_snapshot_job() -> None:
-    """Send a plain-English architecture snapshot at 7 PM UTC."""
+    """Send a plain-English architecture snapshot at evening cron (UTC)."""
     if not settings.automation_enabled:
         logger.debug("architecture_snapshot_job: automation disabled — skipping.")
         return
 
     logger.info("Running architecture snapshot job...")
     try:
-        from ragbrain.delivery.slack_delivery import post_briefing
         from ragbrain.pipelines.daily_briefing import architecture_snapshot
 
         snapshot = architecture_snapshot()
-        post_briefing(snapshot)
-        logger.info("Architecture snapshot sent to Slack.")
+        if settings.telegram_bot_token and settings.telegram_chat_id:
+            asyncio.run(_send_telegram(snapshot))
+            logger.info("Architecture snapshot sent to Telegram.")
+        else:
+            logger.warning("Architecture snapshot generated but Telegram not configured.")
     except Exception:
         logger.exception("Architecture snapshot job failed")
 
 
+def news_commit_job() -> None:
+    """Auto-commit any new daily briefing files in news/ (runs nightly at 9 PM UTC).
+
+    Checks for untracked or modified files under news/*.md, commits them with a
+    descriptive message, and sends a Telegram confirmation.  Safe to run even
+    when there is nothing new — it simply exits without committing.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    news_dir = repo_root / "news"
+
+    if not news_dir.exists():
+        return
+
+    # Find any *.md files in news/ that are untracked or modified
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "news/"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    changed_lines = [l for l in result.stdout.splitlines() if l.strip()]
+    if not changed_lines:
+        logger.info("news_commit_job: nothing new in news/ — skipping commit.")
+        return
+
+    dated_files = sorted(
+        p.name for p in news_dir.glob("????-??-??.md")
+        if any(p.name in line for line in changed_lines)
+    )
+    dates_label = ", ".join(f.replace(".md", "") for f in dated_files) or "updates"
+    commit_msg = f"news: {dates_label}"
+
+    try:
+        subprocess.run(["git", "add", "news/"], cwd=repo_root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        logger.info("news_commit_job: committed — %s", commit_msg)
+        _notify_status(
+            f"📰 News auto-committed: <code>{commit_msg}</code>\n"
+            f"Files: {', '.join(dated_files)}"
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.exception("news_commit_job: git commit failed")
+        _notify_status(f"⚠️ News auto-commit failed: {exc.stderr or exc}")
+
+
 def architecture_review_job() -> None:
-    """Ingest Slack news and run architecture review."""
+    """Run architecture review (RSS news + gap analysis); post to Telegram if configured."""
     logger.info("Running architecture review job...")
     try:
-        from ragbrain.ingestion.extractors.slack import SlackExtractor
-        from ragbrain.ingestion.pipeline import IngestionPipeline
-        from ragbrain.pipelines.architecture_review import post_to_slack, run_review
+        from ragbrain.pipelines.architecture_review import run_review
 
-        # Step 1: ingest recent Slack messages into the knowledge base
-        extractor = SlackExtractor(fetch_urls=False)
-        docs = extractor.extract_recent()
-        if docs:
-            pipeline = IngestionPipeline()
-            for doc in docs:
-                pipeline.ingest_document(doc)
-            logger.info("Ingested %d Slack news messages.", len(docs))
-
-        # Step 2: run the architecture review
-        report = run_review(post_slack=False)
+        post_tg = bool(settings.telegram_bot_token and settings.telegram_chat_id)
+        report = run_review(post_slack=False, post_telegram=post_tg)
         print(report)
-
-        # Step 3: post to Slack if configured
-        if settings.slack_bot_token and (settings.slack_post_channel_id or settings.slack_channel_id):
-            post_to_slack(report)
-            logger.info("Architecture review posted to Slack.")
+        if post_tg:
+            logger.info("Architecture review posted to Telegram.")
     except Exception:
         logger.exception("Architecture review job failed")
 
@@ -334,16 +410,24 @@ def run_scheduler() -> None:
         name="Morning Article Digest",
         misfire_grace_time=300,
     )
+    if settings.evening_book_lesson_enabled:
+        scheduler.add_job(
+            evening_lesson_job,
+            CronTrigger(**evening_cron),
+            id="evening_lesson",
+            name="Evening Book Lesson",
+            misfire_grace_time=300,
+        )
     scheduler.add_job(
-        evening_lesson_job,
-        CronTrigger(**evening_cron),
-        id="evening_lesson",
-        name="Evening Book Lesson",
-        misfire_grace_time=300,
+        scheduler_heartbeat_job,
+        CronTrigger(minute="*/30"),
+        id="scheduler_heartbeat",
+        name="Scheduler Heartbeat",
+        misfire_grace_time=120,
     )
 
-    # Architecture review runs 30 minutes after morning digest
-    if settings.slack_bot_token and settings.slack_channel_id:
+    # Architecture review runs 30 minutes after morning digest only when enabled.
+    if settings.architecture_review_enabled:
         review_cron = dict(morning_cron)
         review_cron["minute"] = "30"
         scheduler.add_job(
@@ -353,6 +437,15 @@ def run_scheduler() -> None:
             name="Architecture Review",
             misfire_grace_time=300,
         )
+
+    # News auto-commit — runs every night at 9 PM UTC regardless of other flags.
+    scheduler.add_job(
+        news_commit_job,
+        CronTrigger(hour=21, minute=0),
+        id="news_commit",
+        name="News Auto-Commit",
+        misfire_grace_time=3600,
+    )
 
     # ---- Vacation automation jobs (only when enabled) ----------------
     if settings.automation_enabled:
@@ -376,12 +469,20 @@ def run_scheduler() -> None:
 
     logger.info(
         f"Scheduler started. Morning digest: {settings.morning_cron}, "
-        f"Evening lesson: {settings.evening_cron} (UTC)"
+        f"Evening book lesson: {'enabled ' + settings.evening_cron if settings.evening_book_lesson_enabled else 'disabled'} (UTC)"
     )
     print(f"  Morning digest:     {settings.morning_cron} (UTC)")
-    print(f"  Evening lesson:     {settings.evening_cron} (UTC)")
-    if settings.slack_bot_token and settings.slack_channel_id:
-        print(f"  Arch review:        {review_cron.get('minute', '30')} {morning_cron.get('hour', '8')} * * * (UTC)")
+    print("  News auto-commit:   0 21 * * * (UTC, 9 PM)")
+    if settings.evening_book_lesson_enabled:
+        print(f"  Evening book lesson: {settings.evening_cron} (UTC)  [ENABLED]")
+    else:
+        print("  Evening book lesson: DISABLED (set RAGBRAIN_EVENING_BOOK_LESSON_ENABLED=true)")
+    if settings.architecture_review_enabled:
+        _rc = dict(morning_cron)
+        _rc["minute"] = "30"
+        print(f"  Arch review:        {_rc.get('minute', '30')} {_rc.get('hour', '8')} * * * (UTC)")
+    else:
+        print("  Arch review:        DISABLED (set RAGBRAIN_ARCHITECTURE_REVIEW_ENABLED=true)")
     if settings.automation_enabled:
         print(f"  Daily automation:   {settings.morning_cron} (UTC)  [ENABLED]")
         print(f"  Arch snapshot:      {settings.evening_cron} (UTC)  [ENABLED]")
